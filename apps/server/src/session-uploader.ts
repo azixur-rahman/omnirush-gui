@@ -34,6 +34,7 @@ import type { BoxCaptureInfo } from "./box/service.js";
 import { engine2ImportedFrom } from "./engine2/imported.js";
 import { ContextCapture, captureContextEnabled, type ContextOptions } from "./context/index.js";
 import { INSTALL_LOG_OFF, installLogGate, type InstallLogGate } from "./context/install-log.js";
+import { UPLOAD_FORMAT_FILE, UploadFormat } from "./context/upload-format.js";
 import { isOpaqueKey, isOpaqueString, isSecretKey, isSecretValue, redactCredentials, redactionPolicy, redactionV3 } from "./context/redact-policy.js";
 import { maskWindowsProfiles } from "./context/privacy.js";
 import bundledBestPractices from "./bundled-best-practices.json" with { type: "json" };
@@ -740,7 +741,11 @@ type SessionUploaderOptions = {
   confirm?: boolean;
   /** GET /omnirush/me/sessions/{id}/integrity for this account (where the server's copy of a chat stands). */
   sessionIntegrity?: (sessionId: string, options?: { summary?: boolean; turns?: number }) => Promise<Response>;
-  /** Negotiates the canonical structured trace envelope. Failures fall back to schema v2. */
+  /**
+   * Negotiates the canonical structured trace envelope (context/upload-format.ts):
+   * schema 3 once the server has advertised it, kept when a later check fails
+   * (it throws); schema 2 only while nothing is known or after /collect refused schema 3.
+   */
   capabilities?: () => Promise<TraceCapabilities>;
   /**
    * Asks the account layer for a fresh access token once the gateway rejects
@@ -4559,8 +4564,10 @@ export class SessionUploader {
   private readonly capabilityProbe?: SessionUploaderOptions["capabilities"];
   private readonly installLogPaths: { raw: string; bin?: string | null } | null;
   private installGateCache: { value: InstallLogGate; expiresAt: number } | null = null;
-  private traceSchemaCache: { version: 2 | 3; features: UploadFeatures; expiresAt: number } | null = null;
-  private traceSchemaProbe: Promise<2 | 3> | null = null;
+  /** The trace schema to send (context/upload-format.ts), remembered per server in the state dir. */
+  private readonly uploadFormat: UploadFormat<TraceCapabilities>;
+  /** The features of the last capabilities answer; kept while a later check fails. */
+  private probedFeatures: UploadFeatures | null = null;
   /** Work counters for tests and profiling. */
   readonly metrics: UploadMetrics = freshMetrics();
   /** Capture context (context/), null when off. */
@@ -4584,6 +4591,16 @@ export class SessionUploader {
     this.log = options.log ?? (() => undefined);
     const stateDir = options.stateDir ? resolve(options.stateDir) : null;
     this.stateDir = stateDir;
+    this.uploadFormat = new UploadFormat<TraceCapabilities>({
+      file: stateDir ? join(stateDir, UPLOAD_FORMAT_FILE) : null,
+      // The broker's gateway when uploads go through it (one per install).
+      server: () => this.uploadUrl ?? "gateway",
+      ...(this.capabilityProbe ? { probe: this.capabilityProbe } : {}),
+      onAnswer: (capabilities) => {
+        this.probedFeatures = { idempotencyKey: capabilities.idempotency_key === true, integrity: capabilities.integrity === true };
+      },
+      log: (level, message, attributes) => this.log(level, message, attributes),
+    });
     this.ledgerPath = stateDir ? join(stateDir, UPLOAD_SESSION_LEDGER_FILE) : null;
     this.spoolDir = stateDir ? join(stateDir, UPLOAD_SPOOL_DIRECTORY) : null;
     this.journalDir = stateDir ? join(stateDir, UPLOAD_JOURNAL_DIRECTORY) : null;
@@ -4981,32 +4998,7 @@ export class SessionUploader {
   }
 
   private negotiatedTraceSchema(force = false): Promise<2 | 3> {
-    if (!force && this.traceSchemaCache && this.traceSchemaCache.expiresAt > Date.now()) {
-      return Promise.resolve(this.traceSchemaCache.version);
-    }
-    if (this.traceSchemaProbe) return this.traceSchemaProbe;
-    this.traceSchemaProbe = (async () => {
-      let version: 2 | 3 = 2;
-      let features: UploadFeatures = NO_UPLOAD_FEATURES;
-      if (this.capabilityProbe) {
-        try {
-          const capabilities = await this.capabilityProbe();
-          version = capabilities.canonical_trace
-            && Array.isArray(capabilities.schema_versions)
-            && capabilities.schema_versions.includes(TRACE_SCHEMA_VERSION)
-            ? 3
-            : 2;
-          features = { idempotencyKey: capabilities.idempotency_key === true, integrity: capabilities.integrity === true };
-        } catch {
-          version = 2;
-        }
-      }
-      this.traceSchemaCache = { version, features, expiresAt: Date.now() + TRACE_CAPABILITY_TTL_MS };
-      return version;
-    })().finally(() => {
-      this.traceSchemaProbe = null;
-    });
-    return this.traceSchemaProbe;
+    return this.uploadFormat.version(force);
   }
 
   /**
@@ -5039,13 +5031,13 @@ export class SessionUploader {
   }
 
   private downgradeTraceSchema(): void {
-    this.traceSchemaCache = { version: 2, features: this.traceSchemaCache?.features ?? NO_UPLOAD_FEATURES, expiresAt: Date.now() + TRACE_CAPABILITY_TTL_MS };
+    this.uploadFormat.unsupported();
   }
 
   /** What the backend's /collect takes beyond the envelope (Idempotency-Key, the integrity route), asked with the trace schema. */
   private async uploadFeatures(): Promise<UploadFeatures> {
     await this.negotiatedTraceSchema();
-    return this.traceSchemaCache?.features ?? NO_UPLOAD_FEATURES;
+    return this.probedFeatures ?? NO_UPLOAD_FEATURES;
   }
 
   /** `turnsBefore`: the turns a reopened chat already had, so capture context numbers its turns on from them. */
@@ -7632,8 +7624,8 @@ export class SessionUploader {
     this.draining?.controller.abort();
     this.account.abort();
     this.account = new AbortController();
-    this.traceSchemaCache = null;
-    this.traceSchemaProbe = null;
+    this.uploadFormat.reset();
+    this.probedFeatures = null;
     this.retryFailures = 0;
     return this.spoolLocked(async () => {
       // The turn diffs' bases are workspace content on disk too, and so are the journals.

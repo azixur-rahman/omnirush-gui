@@ -19,6 +19,8 @@ const MAX_ATTACHMENT_RETRIES = 2;
 const MAX_ATTACHMENT_ERROR_BYTES = 256 * 1024;
 
 const TRACE_CAPABILITY_TTL_MS = 5 * 60_000;
+/** A failed capabilities check is not asked again sooner than this (the uploader keeps what it knew meanwhile). */
+const TRACE_CAPABILITY_RETRY_MS = 30_000;
 
 /** Without the account's catalog (a standalone broker): the built-in catalog decides. */
 function defaultReasoningSummaryFor(model: string): boolean {
@@ -1076,7 +1078,8 @@ export class OmniRushGatewayBroker {
    */
   private readonly rejectedAttachments = new RejectedAttachments();
   private capabilityCache: { gatewayUrl: string; accountKey: string; capabilities: TraceCapabilities; expiresAt: number } | null = null;
-  private capabilityProbe: { key: string; promise: Promise<TraceCapabilities> } | null = null;
+  private capabilityProbe: { key: string; promise: Promise<TraceCapabilities | null> } | null = null;
+  private capabilityFailure: { gatewayUrl: string; accountKey: string; until: number } | null = null;
 
   constructor(options: BrokerOptions) {
     const gatewayUrl = options.credentials ? normalizedGatewayUrl(options.credentials.gatewayUrl) : null;
@@ -1354,8 +1357,20 @@ export class OmniRushGatewayBroker {
     });
   }
 
-  async sessionUploadCapabilities(): Promise<TraceCapabilities> {
-    if (!this.state) return { schema_versions: [1, 2, 3], canonical_trace: false };
+  /**
+   * The backend's upload capabilities, cached for TRACE_CAPABILITY_TTL_MS. A
+   * check that got no usable answer (a 401 after the refresh, a 5xx, a
+   * timeout) is not an answer: with `strict` (the session uploader, which
+   * then keeps the format the server last advertised) it throws; otherwise
+   * it reads as the oldest backend. Either way it is asked again after
+   * TRACE_CAPABILITY_RETRY_MS, not after the full TTL.
+   */
+  async sessionUploadCapabilities(options: { strict?: boolean } = {}): Promise<TraceCapabilities> {
+    const none: TraceCapabilities = { schema_versions: [1, 2], canonical_trace: false };
+    if (!this.state) {
+      if (options.strict) throw new Error("capabilities unavailable: signed out");
+      return { schema_versions: [1, 2, 3], canonical_trace: false };
+    }
     const state = this.state;
     const gatewayUrl = state.gatewayUrl;
     const key = this.capabilityKey(state);
@@ -1363,6 +1378,15 @@ export class OmniRushGatewayBroker {
       && this.capabilityCache.accountKey === key
       && this.capabilityCache.expiresAt > Date.now()) {
       return this.capabilityCache.capabilities;
+    }
+    const failed = () => {
+      if (options.strict) throw new Error("capabilities request failed");
+      return none;
+    };
+    if (this.capabilityFailure?.gatewayUrl === gatewayUrl
+      && this.capabilityFailure.accountKey === key
+      && this.capabilityFailure.until > Date.now()) {
+      return failed();
     }
     const pending = this.capabilityProbe?.key === key
       ? this.capabilityProbe.promise
@@ -1374,8 +1398,15 @@ export class OmniRushGatewayBroker {
       }).catch(() => undefined);
     }
     const capabilities = await pending;
-    if (this.state && this.capabilityKey(this.state) === key) {
-      this.capabilityCache = { gatewayUrl, accountKey: key, capabilities, expiresAt: Date.now() + TRACE_CAPABILITY_TTL_MS };
+    // The key after the probe: a 401 inside it may have rotated the pair.
+    const settledKey = this.state ? this.capabilityKey(this.state) : null;
+    if (capabilities === null) {
+      if (settledKey) this.capabilityFailure = { gatewayUrl, accountKey: settledKey, until: Date.now() + TRACE_CAPABILITY_RETRY_MS };
+      return failed();
+    }
+    if (settledKey && this.state?.gatewayUrl === gatewayUrl) {
+      this.capabilityFailure = null;
+      this.capabilityCache = { gatewayUrl, accountKey: settledKey, capabilities, expiresAt: Date.now() + TRACE_CAPABILITY_TTL_MS };
     }
     return capabilities;
   }
@@ -1383,6 +1414,7 @@ export class OmniRushGatewayBroker {
   resetCapabilities(): void {
     this.capabilityCache = null;
     this.capabilityProbe = null;
+    this.capabilityFailure = null;
   }
 
   /**
@@ -1460,13 +1492,13 @@ export class OmniRushGatewayBroker {
 
   /**
    * The backend's /collect/capabilities: the trace schema and the features
-   * it has (a key it does not name is false). A failed read is the oldest
-   * backend: schema 2 and no features, asked again once the cache expires.
+   * it has (a key it does not name is false). Null when no usable answer
+   * came (a 401 after the refresh, a 5xx, a timeout, an unreadable body):
+   * that says nothing about what the backend takes.
    */
-  private async probeSessionUploadCapabilities(gatewayUrl: string): Promise<TraceCapabilities> {
-    const none: TraceCapabilities = { schema_versions: [1, 2], canonical_trace: false };
+  private async probeSessionUploadCapabilities(gatewayUrl: string): Promise<TraceCapabilities | null> {
     try {
-      if (this.state?.gatewayUrl !== gatewayUrl) return none;
+      if (this.state?.gatewayUrl !== gatewayUrl) return null;
       const response = await this.withDeviceBearer((state) => this.fetcher(apiUrl(state.gatewayUrl, "collect/capabilities"), {
         method: "GET",
         headers: { Authorization: `Bearer ${state.accessToken}`, Accept: "application/json" },
@@ -1474,12 +1506,13 @@ export class OmniRushGatewayBroker {
       }));
       if (!response.ok) {
         await response.body?.cancel().catch(() => undefined);
-        return none;
+        // A backend without the route is the oldest one: that is an answer.
+        return response.status === 404 ? { schema_versions: [1, 2], canonical_trace: false } : null;
       }
       const text = await boundedText(response, 64 * 1024);
-      if (text === null) return none;
+      if (text === null) return null;
       const payload: unknown = JSON.parse(text);
-      if (!isRecord(payload)) return none;
+      if (!isRecord(payload)) return null;
       const v3 = payload.canonical_trace === true && Array.isArray(payload.schema_versions) && payload.schema_versions.some((version) => version === 3);
       const triggers = Array.isArray(payload.triggers) ? payload.triggers.filter((item): item is string => typeof item === "string") : null;
       const installLog = isRecord(payload.install_log) ? payload.install_log : null;
@@ -1493,7 +1526,7 @@ export class OmniRushGatewayBroker {
         ...(isRecord(payload.local_box) ? { local_box: { default: String(payload.local_box.default ?? "off"), max_turn_bytes: typeof payload.local_box.max_turn_bytes === "number" ? payload.local_box.max_turn_bytes : null } } : {}),
       };
     } catch {
-      return none;
+      return null;
     }
   }
 

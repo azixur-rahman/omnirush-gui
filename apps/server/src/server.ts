@@ -1124,7 +1124,8 @@ export async function startServer(config: ServerConfig): Promise<ServeResult> {
       ? {
           upload: (sessionId, compressed, signal, request) => gatewayBroker.uploadSession(sessionId, compressed, signal, request),
           uploadFile: (sessionId, path, size, signal, request) => gatewayBroker.uploadSessionFile(sessionId, path, size, signal, request),
-          capabilities: () => gatewayBroker.sessionUploadCapabilities(),
+          // Strict: a failed check throws, and the uploader keeps the format the server last advertised.
+          capabilities: () => gatewayBroker.sessionUploadCapabilities({ strict: true }),
           refreshAccessToken: () => gatewayBroker.refreshAccessToken(),
         }
       : {},
