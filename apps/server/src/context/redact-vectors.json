@@ -224,10 +224,22 @@
    "context": "app/.env"
   },
   {
-   "name": "env example kept",
+   "name": "env example filled in",
    "input": "DB_PASSWORD=supersecretword",
-   "expect": "DB_PASSWORD=supersecretword",
+   "expect": "DB_PASSWORD=[REDACTED]",
    "context": "app/.env.example"
+  },
+  {
+   "name": "env example placeholders kept",
+   "input": "PORT=3000\nDB_PASSWORD=<your-password>\nAPI_KEY=your-api-key-here\nSECRET_KEY=changeme\nJWT_SECRET=",
+   "expect": "PORT=3000\nDB_PASSWORD=<your-password>\nAPI_KEY=your-api-key-here\nSECRET_KEY=changeme\nJWT_SECRET=",
+   "context": "app/.env.sample"
+  },
+  {
+   "name": "env template real values",
+   "input": "API_TOKEN=abcdefgh123\nDATABASE_PASSWORD=Summer2024!\nJWT_SECRET=supersecretjwt",
+   "expect": "API_TOKEN=[REDACTED]\nDATABASE_PASSWORD=[REDACTED]\nJWT_SECRET=[REDACTED]",
+   "context": "/w/api/.env.template"
   },
   {
    "name": "named env file any value",

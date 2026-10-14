@@ -1337,11 +1337,11 @@ function isNamedEnvFile(lowerName: string): boolean {
 }
 
 /**
- * The scrub context of a file kept in the snapshot or the git block. A `.env`
- * template is scrubbed as its `.env`: redact-policy's isCredentialFile exempts
- * templates, so without this a secret-named value that does not look
- * generated (`DB_PASSWORD=Summer2024!`) would leave in a template that a
- * user filled with real values.
+ * The scrub context of a file's text (a snapshot file, its git block section,
+ * a file tool's input or output in the main log). A `.env` template is scrubbed
+ * as its `.env`, so a secret-named value that does not look generated
+ * (`DB_PASSWORD=Summer2024!`) never stays in a template a user filled with
+ * real values (redact-policy's isCredentialFile agrees for templates too).
  */
 function snapshotScrubContext(path: string): string {
   return isEnvTemplate(pathComponents(path)) ? path.replace(/\.[^./\\]+$/, "") : path;
@@ -2067,9 +2067,9 @@ function diffSegmentPath(segment: string, fallback: string | null): string | nul
   return fallback;
 }
 
-/** Scrubs `text` as a file's text: the mode the path selects, CONFIG with no path. */
+/** Scrubs `text` as a file's text: the mode the path selects, CONFIG with no path, under the file's scrub context (snapshotScrubContext). */
 function redactFileText(text: string, path: string | null, tally: { count: number }): string {
-  const result = path === null ? redactUploadText(text) : redactUploadText(text, { context: path, mode: redactModeForPath(path) });
+  const result = path === null ? redactUploadText(text) : redactUploadText(text, { context: snapshotScrubContext(path), mode: redactModeForPath(path) });
   tally.count += result.count;
   return result.text;
 }

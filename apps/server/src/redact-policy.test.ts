@@ -88,3 +88,31 @@ test("the archive policy carries the server's switch", () => {
   assert.equal(parseArchivePolicy({ policy: {} }).redactionV3, undefined);
   assert.equal(parseArchivePolicy({}).redactionV3, undefined);
 });
+
+test("a filled-in .env template in a file tool's output or input is scrubbed as its .env, under both rule sets", () => {
+  const filled = "PORT=3000\nAPI_TOKEN=abcdefgh123\nDATABASE_PASSWORD=Summer2024!\nJWT_SECRET=supersecretjwt\nAPI_KEY=<your-api-key>\n";
+  const numbered = filled.split("\n").filter(Boolean).map((line, i) => `${String(i + 1).padStart(5, "0")}| ${line}\n`).join("");
+  const document = {
+    events: [{
+      type: "turn.messages",
+      data: {
+        messages: [{
+          role: "assistant",
+          parts: [
+            { type: "tool", tool: "read", state: { status: "completed", input: { filePath: "/w/app/.env.example" }, output: `<file>\n${numbered}</file>` } },
+            { type: "tool", tool: "write", state: { status: "completed", input: { filePath: "/w/api/.env.sample", content: filled }, output: "Wrote file successfully." } },
+          ],
+        }],
+      },
+    }],
+  };
+  for (const name of ["client-v3", "legacy"]) {
+    const out = withPolicy(name, () => plain(uploader.redactUploadJson(document, { fileAware: true }).value));
+    const [read, write] = out.events[0].data.messages[0].parts;
+    for (const secret of ["abcdefgh123", "Summer2024!", "supersecretjwt"]) {
+      assert.ok(!JSON.stringify(out).includes(secret), `${name} ${secret}`);
+    }
+    assert.match(read.state.output, /00001\| PORT=3000\n00002\| API_TOKEN=\[REDACTED[^\n]*\n00003\| DATABASE_PASSWORD=\[REDACTED[^\n]*\n00004\| JWT_SECRET=\[REDACTED[^\n]*\n00005\| API_KEY=<your-api-key>\n/, name);
+    assert.match(write.state.input.content, /^PORT=3000\nAPI_TOKEN=\[REDACTED[^\n]*\n[\s\S]*API_KEY=<your-api-key>\n$/, name);
+  }
+});

@@ -143,14 +143,15 @@ export function looksRandomName(value: string): boolean {
 
 /**
  * Credential files: any non-placeholder value of a secret-named key there is
- * a credential. `.env*` except examples and templates, `*.env`, `.npmrc`, `.pypirc`,
+ * a credential. `.env*` (templates too: a `.env.example` a user filled in holds
+ * the real values; placeholders still stay), `*.env`, `.npmrc`, `.pypirc`,
  * `.netrc`, `.pgpass`, `.git-credentials`, `credentials` (`.aws/credentials`),
  * kubeconfig.
  */
 export function isCredentialFile(path: string | undefined): boolean {
   if (!path) return false;
   const name = path.split(/[\\/]/).pop()!.toLowerCase();
-  if (name.startsWith(".env")) return !/(?:example|sample|template|dist|defaults?)$/.test(name);
+  if (name.startsWith(".env")) return true;
   // A named env file (`prod.env`, `docker/production.env`) is a `.env` by another name.
   if (/^.+\.env$/.test(name)) return true;
   return [".npmrc", ".pypirc", ".netrc", "_netrc", ".pgpass", ".git-credentials", "credentials", "kubeconfig", "config.kube"].includes(name)
