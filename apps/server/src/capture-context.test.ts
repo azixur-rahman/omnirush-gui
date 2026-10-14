@@ -20,6 +20,7 @@ import * as commands from "./context/commands.js";
 import * as outside from "./context/outside.js";
 import * as ephemeral from "./context/ephemeral.js";
 import * as network from "./context/network.js";
+import * as installLog from "./context/install-log.js";
 import * as context from "./context/index.js";
 import * as uploader from "./session-uploader.js";
 
@@ -228,6 +229,78 @@ test.skipIf(process.platform !== "linux")("#19 snapshot: dev processes with scru
   } finally {
     child.kill();
     server.close();
+  }
+});
+
+// --- #19 in an OmniRush box ---------------------------------------------------------------
+
+/** What a box answers (a fake of the runner that runs commands inside it). */
+const BOX_PS = [
+  "    1     0 /opt/omnirush/boxd",
+  "   40     1 /bin/bash -c npm run dev",
+  `   41    40 node server.js --token=${GH_TOKEN}`,
+  "   77     1 ps -eww -o pid=,ppid=,args=",
+].join("\n");
+const TCP_HEADER = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n";
+const BOX_NET = TCP_HEADER
+  + "   0: 0100007F:0BB8 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 5551 1 0 100 0 0 10 0\n"
+  + "   1: 0100007F:0BB8 0100007F:A2C4 01 00000000:00000000 00:00000000 00000000     0        0 5552 1 0 20 4 30 10 -1\n"
+  + TCP_HEADER
+  + "   0: 00000000000000000000000000000000:1F90 00000000000000000000000000000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 5553 1 0 100 0 0 10 0\n"
+  + "#owners\n41 5551\n41 5552\n";
+const boxRunner = (answers: Record<string, string>): exec.Runner => async (file, args) => {
+  const key = file === "sh" ? (args[1]!.includes("#owners") ? "sockets" : "which") : `${file} ${args.join(" ")}`;
+  const stdout = answers[key];
+  return stdout === undefined ? null : { code: 0, stdout, stderr: "", truncated: false, timedOut: false };
+};
+
+test("#19 in a box: the box's processes and listening ports, through its runner; its helper and the probes left out", async () => {
+  const run = boxRunner({ "ps -eww -o pid=,ppid=,args=": BOX_PS, sockets: BOX_NET });
+  const snapshot = await processes.boxProcessSnapshot("turn_start", 2, run, { privacy: privacy.currentPrivacy(), scrub: SCRUB });
+  assert.equal(snapshot.phase, "turn_start");
+  assert.equal(snapshot.turn, 2);
+  assert.equal(snapshot.method, "box-ps+box-proc");
+  assert.deepEqual(snapshot.processes.map((entry) => entry.pid).sort(), [40, 41]);
+  assert.ok(snapshot.processes.every((entry) => entry.scope === "session"));
+  assert.ok(snapshot.processes.find((entry) => entry.pid === 41)!.command.includes("--token=[REDACTED]"));
+  assertNoSecrets(snapshot);
+  const ports = snapshot.listening.map((entry) => [entry.port, "address" in entry ? entry.address : undefined, "pid" in entry ? entry.pid : undefined]);
+  assert.deepEqual(ports, [[3000, "loopback", 41], [8080, "any", 0]], "only LISTEN sockets, owner from the box's /proc (0: the box, owner unknown)");
+  const empty = await processes.boxProcessSnapshot("session_start", 0, async () => null, { privacy: privacy.currentPrivacy(), scrub: SCRUB });
+  assert.deepEqual([empty.processes, empty.listening], [[], []]);
+});
+
+test("#19 in a box: the socket table parses tcp and tcp6 with their headers", () => {
+  const ports = processes.parseBoxSockets(BOX_NET, [{ pid: 41, ppid: 40, name: "node", command: "node server.js" }]);
+  assert.deepEqual(ports, [
+    { proto: "tcp", address: "127.0.0.1", port: 3000, pid: 41, process: "node" },
+    { proto: "tcp", address: "::", port: 8080, pid: null, process: null },
+  ]);
+});
+
+test("env_turn in a box: the box's OS, architecture and runtimes, not this machine's", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "omnirush-boxenv-"));
+  try {
+    fs.writeFileSync(path.join(root, ".nvmrc"), "22\n");
+    const box = boxRunner({
+      which: "x86_64\n6.8.0-45-generic\nnode /usr/local/bin/node\npython3 /usr/bin/python3\n",
+      "/usr/local/bin/node --version": "v22.23.3\n",
+      "/usr/bin/python3 --version": "Python 3.11.2\n",
+    });
+    const host: exec.Runner = async () => { throw new Error("this machine must not be probed"); };
+    const options = { root, pathValue: "/nowhere", skipDir: null, env: {}, platform: "darwin" as const, arch: "arm64", osVersion: "25.6.0", privacy: privacy.currentPrivacy(), run: host, box };
+    const first = await installLog.envFingerprint(options);
+    assert.equal(first.os, "linux");
+    assert.equal(first.arch, "x64");
+    assert.equal(first.os_version, "6.8.0-45-generic");
+    assert.deepEqual(first.runtimes, { node: "22.23.3", python: "3.11.2" });
+    assert.deepEqual(first.paths, { node: "/usr/local/bin/node", python: "/usr/bin/python3" });
+    assert.deepEqual(first.pins, { ".nvmrc": "22" });
+    assert.equal(first.changed, true);
+    const again = await installLog.envFingerprint(options);
+    assert.equal(again.changed, false, "probed again only when the box's runtimes or pins change");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
   }
 });
 

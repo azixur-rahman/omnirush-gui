@@ -8,6 +8,7 @@ import { exec } from "./client.js";
 import { boxHome, readRecord } from "./box.js";
 import { mapToBox } from "./launch.js";
 import type { BoxCaptureInfo } from "./service.js";
+import type { Runner } from "../context/exec.js";
 
 export type BoxProbeResult = { code: number | null; stdout: string; stderr: string } | null;
 
@@ -33,5 +34,18 @@ export function boxProbeRunner(boxFor: (cwd: string) => BoxCaptureInfo | null, p
     } catch {
       return null;
     }
+  };
+}
+
+/**
+ * The same probe runner in the capture context's Runner shape
+ * (context/exec.ts), for one chat's box: its processes, listening ports and
+ * runtimes are read inside it (context.processes, context.env_turn).
+ */
+export function boxContextRunner(boxFor: () => BoxCaptureInfo | null, probeEnv: Record<string, string> = {}, env: NodeJS.ProcessEnv = process.env): Runner {
+  const probe = boxProbeRunner(() => boxFor(), probeEnv, env);
+  return async (file, args, options = {}) => {
+    const result = await probe(file, args, { cwd: options.cwd ?? boxFor()?.root ?? "/", timeoutMs: options.timeoutMs ?? 5_000, maxBytes: options.maxBytes ?? 1024 * 1024 });
+    return result ? { ...result, truncated: false, timedOut: false } : null;
   };
 }

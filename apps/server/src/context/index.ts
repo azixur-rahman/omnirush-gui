@@ -53,7 +53,7 @@ import {
 } from "./install-log.js";
 import { collectPmConfig } from "./pm-config.js";
 import { cleanUrl, currentPrivacy, tildeText, type PrivacyContext, type Scrubber } from "./privacy.js";
-import { processSnapshot, processTable, listeningPorts, type ProcessInfo, type ListeningPort, type SnapshotScope } from "./processes.js";
+import { boxProcessSnapshot, processSnapshot, processTable, listeningPorts, type ProcessInfo, type ListeningPort, type SnapshotScope } from "./processes.js";
 import { collectServices } from "./services.js";
 import { collectSetup, type SetupFile, type SetupModel } from "./setup.js";
 import { collectShellAliases } from "./shell-aliases.js";
@@ -134,6 +134,13 @@ export type ContextOptions = {
   installRun?: Runner;
   /** The app's own state folders: never listed as files a turn wrote. */
   appDirs?: string[];
+  /**
+   * The OmniRush box a session's shell tool runs in (src/box): a runner for
+   * commands inside it, else null. The session's processes, servers and
+   * runtimes are the box's, so `context.processes` and `context.env_turn`
+   * read them there instead of on this machine.
+   */
+  box?: (sessionId: string, root: string) => Runner | null;
 };
 
 /** Shell call windows kept per session for matching the install log's noted calls. */
@@ -229,6 +236,10 @@ export class ContextCapture {
   }
 
   /** The session's processes: the app's process tree, and processes working in the project or its outside folders. */
+  private boxOf(state: SessionContext): Runner | null {
+    return this.options.box?.(state.id, state.root) ?? null;
+  }
+
   private scopeOf(state: SessionContext): SnapshotScope {
     return { rootPid: this.options.rootPid ?? process.pid, folders: () => [state.root, ...state.outside.folderPaths()] };
   }
@@ -539,6 +550,7 @@ export class ContextCapture {
         })(),
         privacy: this.privacy,
         run: this.options.installRun ?? runCommand,
+        box: this.boxOf(state),
       });
       timings.fingerprint = Math.round(performance.now() - at);
       at = performance.now();
@@ -589,7 +601,9 @@ export class ContextCapture {
     let table: ProcessInfo[] = [];
     let listening: ListeningPort[] = [];
     if (this.section("processes")) {
+      const box = this.boxOf(state);
       const snapshot = await timed("processes", async () => {
+        if (box) return boxProcessSnapshot("session_start", 0, box, { ...runOpts, privacy, scrub });
         const { processes, method } = await processTable(runOpts);
         table = processes;
         const ports = await listeningPorts(processes, runOpts);
@@ -683,7 +697,10 @@ export class ContextCapture {
     this.track(state, (async () => {
       if (after) await withTimeout(after, SECTION_TIMEOUT_MS);
       const started = performance.now();
-      const snapshot = await withTimeout(processSnapshot("turn_start", turn, { platform: this.platform, privacy: this.privacy, scrub: this.options.scrub, scope: this.scopeOf(state) }), SECTION_TIMEOUT_MS);
+      const box = this.boxOf(state);
+      const snapshot = await withTimeout(box
+        ? boxProcessSnapshot("turn_start", turn, box, { platform: this.platform, privacy: this.privacy, scrub: this.options.scrub })
+        : processSnapshot("turn_start", turn, { platform: this.platform, privacy: this.privacy, scrub: this.options.scrub, scope: this.scopeOf(state) }), SECTION_TIMEOUT_MS);
       this.timings.turn_start.push(Math.round(performance.now() - started));
       if ("value" in snapshot) this.emit(sessionId, "context.processes", snapshot.value);
     })());

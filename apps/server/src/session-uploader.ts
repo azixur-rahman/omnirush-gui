@@ -29,7 +29,7 @@ import { writeFileAtomic } from "./atomic-write.js";
 import { XCODE_CLT_MISSING, gitSkipReason } from "./command-guard.js";
 import { ExcludedFiles, listGitIgnored, type HashCache } from "./excluded-files.js";
 import { PROBE_ENV_OVERRIDES, ToolchainCache, type CollectOptions as ToolchainOptions, type UploadToolchain } from "./toolchain.js";
-import { boxProbeRunner } from "./box/capture.js";
+import { boxContextRunner, boxProbeRunner } from "./box/capture.js";
 import type { BoxLabel } from "./box/box.js";
 import type { BoxCaptureInfo } from "./box/service.js";
 import { engine2ImportedFrom } from "./engine2/imported.js";
@@ -4722,10 +4722,15 @@ export class SessionUploader {
     );
     void this.stateMigrated.then(() => this.cleanTempDir(60 * 60_000)).catch(() => undefined);
     this.context = !options.context || !this.enabled ? null : this.createContext(stateDir, options.context);
+    // A box chat: its processes, listening ports and runtimes are read inside its box
+    // (context.processes, context.env_turn); this machine's packages, services, network
+    // and package-manager config are not the chat's. The network observer samples this
+    // machine only: off here.
     this.boxContext = !options.context || !this.enabled ? null : this.createContext(stateDir, {
       ...options.context,
-      sections: { ...options.context.sections, system_packages: false, services: false, pm_config: false, shell_aliases: false, processes: false },
+      sections: { ...options.context.sections, system_packages: false, services: false, pm_config: false, shell_aliases: false },
       network: false,
+      box: (_sessionId, root) => boxContextRunner(() => this.boxForPath(root), PROBE_ENV_OVERRIDES),
     }, options.boxInstallLog ?? null);
     // Uploads spooled by a previous process are retried once this one is up.
     // Without an account they wait (up to the spool's age limit) for the

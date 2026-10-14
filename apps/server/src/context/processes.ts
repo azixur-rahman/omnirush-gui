@@ -359,6 +359,69 @@ export type SnapshotOptions = ProcessTableOptions & {
   cwdOf?: (pids: number[]) => Promise<Map<number, string>>;
 };
 
+// --- an OmniRush box ------------------------------------------------------------------
+//
+// A session whose shell tool runs in its project's box (src/box) has its
+// processes and servers there, in their own PID namespace, out of this
+// machine's process table. They are read through the box's helper: `ps`
+// for the table, the box's /proc for the listening sockets and their
+// owners. Every process in the box is the session's, but the box's own
+// helper and these probes.
+
+/** The box's own helper and init, never the session's. */
+const BOX_OWN = /^(?:boxd|boxrun|docker-init|tini|catatonit)$/;
+/** `args` only: the name is its program (parsePs), the probe finds itself by its own command line. */
+const BOX_PS_ARGS = ["-eww", "-o", "pid=,ppid=,args="];
+/** Listening sockets (/proc/net/tcp, tcp6), then `<pid> <inode>` for every socket a process holds. */
+const BOX_SOCKETS = 'cat /proc/net/tcp /proc/net/tcp6 2>/dev/null; echo "#owners"; for f in /proc/[0-9]*/fd/*; do l=$(readlink "$f" 2>/dev/null) || continue; case "$l" in socket:*) p=${f#/proc/}; i=${l#socket:[}; echo "${p%%/*} ${i%]}";; esac; done';
+
+/** The box's process table through `run` (a runner for commands inside the box). */
+export async function boxProcessTable(run: Runner): Promise<{ processes: ProcessInfo[]; method: string }> {
+  const result = await run("ps", BOX_PS_ARGS, { timeoutMs: 5_000, maxBytes: 1024 * 1024 });
+  const processes = result && result.code === 0
+    ? parsePs(result.stdout).filter((info) => !BOX_OWN.test(info.name) && !info.command.startsWith(`ps ${BOX_PS_ARGS.join(" ")}`) && !info.command.includes("#owners"))
+    : [];
+  return { processes, method: "box-ps" };
+}
+
+/** The box's listening TCP sockets and their owners (`BOX_SOCKETS` output). */
+export function parseBoxSockets(text: string, processes: readonly ProcessInfo[]): ListeningPort[] {
+  const [table = "", owners = ""] = text.split(/^#owners$/m);
+  const byInode = new Map<number, number>();
+  for (const line of owners.split("\n")) {
+    const match = /^(\d+) (\d+)$/.exec(line.trim());
+    if (match) byInode.set(Number(match[2]), Number(match[1]));
+  }
+  const byPid = new Map(processes.map((p) => [p.pid, p]));
+  // /proc/net/tcp and tcp6 each start with a header line: parse them one by one.
+  const rows = table.split(/^(?=\s*sl\s)/m).flatMap(parseProcNetTcp);
+  return rows.filter((socket) => socket.state === "0A").map((socket) => {
+    const pid = byInode.get(socket.inode) ?? null;
+    return { proto: "tcp" as const, address: socket.local.address, port: socket.local.port, pid, process: pid !== null ? byPid.get(pid)?.name ?? null : null };
+  });
+}
+
+export async function boxListeningPorts(run: Runner, processes: readonly ProcessInfo[]): Promise<{ ports: ListeningPort[]; method: string }> {
+  const result = await run("sh", ["-c", BOX_SOCKETS], { timeoutMs: 5_000, maxBytes: 4 * 1024 * 1024 });
+  return { ports: result && result.code === 0 ? parseBoxSockets(result.stdout, processes) : [], method: "box-proc" };
+}
+
+/** A `context.processes` snapshot of a box: every process in it is the session's (scope: the box's whole tree). */
+export async function boxProcessSnapshot(phase: ProcessSnapshot["phase"], turn: number, run: Runner, options: Omit<SnapshotOptions, "precomputed" | "scope" | "selfPid">): Promise<ProcessSnapshot> {
+  const { processes: table, method } = await boxProcessTable(run);
+  // The box's helper is left out of the table: what it started hangs from the box's root (0).
+  const pids = new Set(table.map((info) => info.pid));
+  const processes = table.map((info) => (pids.has(info.ppid) ? info : { ...info, ppid: 0 }));
+  const ports = await boxListeningPorts(run, processes);
+  return processSnapshot(phase, turn, {
+    ...options,
+    scope: { rootPid: 0, folders: () => [] },
+    selfPid: -1,
+    // Every socket in the box is the session's: one whose owner could not be read is the box's (pid 0).
+    precomputed: { processes, listening: ports.ports.map((port) => (port.pid === null ? { ...port, pid: 0 } : port)), method: `${method}+${ports.method}` },
+  });
+}
+
 /** The descendants of `rootPid` in a process table. */
 export function descendantsOf(rootPid: number, processes: readonly ProcessInfo[]): Set<number> {
   const children = new Map<number, number[]>();

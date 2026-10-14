@@ -1515,7 +1515,73 @@ export type EnvTurn = {
 /** Runtime versions are probed again only when this key (binaries on PATH, their mtime, the version pins) changes. */
 const fingerprintCache = new Map<string, { key: string; runtimes: Record<string, string> }>();
 
-export async function envFingerprint(options: { root: string; pathValue: string; skipDir: string | null; env: NodeJS.ProcessEnv; platform: NodeJS.Platform; arch: string; osVersion: string | null; privacy: PrivacyContext; run: Runner }): Promise<Omit<EnvTurn, "schema" | "turn" | "at" | "installs" | "outside_writes" | "outside_truncated" | "timings_ms">> {
+type EnvFingerprint = Omit<EnvTurn, "schema" | "turn" | "at" | "installs" | "outside_writes" | "outside_truncated" | "timings_ms">;
+
+/** The box's machine, kernel and the runtimes on its PATH (`<command> <path>` lines). */
+const BOX_WHICH = `uname -m; uname -r; for c in ${[...new Set(["mise", ...RUNTIMES.flatMap((runtime) => runtime.commands)])].join(" ")}; do p=$(command -v "$c" 2>/dev/null) && echo "$c $p"; done`;
+
+/**
+ * The fingerprint of a session whose shell tool runs in its box (src/box):
+ * the runtimes the agent's commands run with are the box's, so they are
+ * found and probed there (`run`: a runner for commands inside it); the
+ * version pins are the project's files, the same in and out of the box.
+ */
+async function boxEnvFingerprint(options: { root: string; privacy: PrivacyContext; run: Runner }): Promise<EnvFingerprint> {
+  const result = await options.run("sh", ["-c", BOX_WHICH], { timeoutMs: 5_000, cwd: options.root, maxBytes: 64 * 1024 });
+  const lines = (result && result.code === 0 ? result.stdout : "").split("\n").map((line) => line.trim());
+  const machine = lines[0] ?? "";
+  const found = new Map<string, string>();
+  for (const line of lines.slice(2)) {
+    const match = /^(\S+) (\/\S+)$/.exec(line);
+    if (match) found.set(match[1]!, match[2]!);
+  }
+  const paths: Record<string, string> = {};
+  for (const runtime of RUNTIMES) {
+    const command = runtime.commands.find((name) => found.has(name));
+    if (command) paths[runtime.name] = found.get(command)!;
+  }
+  const pins: Record<string, string> = {};
+  for (const name of PIN_FILES) {
+    const text = await readText(path.join(options.root, name), 4096);
+    if (text !== null) pins[name] = text.trim().slice(0, 512);
+  }
+  const managers = new Set<string>();
+  for (const file of Object.values(paths)) for (const [pattern, manager] of MANAGER_PATH) if (pattern.test(file)) managers.add(manager);
+  if (found.has("mise")) managers.add("mise");
+  const key = `${JSON.stringify(paths)}|${JSON.stringify(pins)}`;
+  const cacheKey = `box\0${options.root}`;
+  const cached = fingerprintCache.get(cacheKey);
+  let runtimes: Record<string, string>;
+  let changed = true;
+  if (cached && cached.key === key) {
+    runtimes = cached.runtimes;
+    changed = false;
+  } else {
+    runtimes = {};
+    await Promise.all(RUNTIMES.map(async (runtime) => {
+      const file = paths[runtime.name];
+      if (!file) return;
+      const probe = await options.run(file, runtime.args, { timeoutMs: 5_000, cwd: options.root, maxBytes: 64 * 1024 });
+      const match = runtime.pattern.exec(`${probe?.stdout ?? ""}\n${probe?.stderr ?? ""}`);
+      if (match) runtimes[runtime.name] = match[1]!;
+    }));
+    fingerprintCache.set(cacheKey, { key, runtimes });
+    changed = !cached || JSON.stringify(cached.runtimes) !== JSON.stringify(runtimes);
+  }
+  return {
+    os: "linux",
+    arch: machine === "x86_64" ? "x64" : machine === "aarch64" ? "arm64" : machine || "unknown",
+    os_version: lines[1] || null,
+    runtimes,
+    paths: Object.fromEntries(Object.entries(paths).map(([name, file]) => [name, tildeText(file, options.privacy)])),
+    managers: [...managers].sort(),
+    pins,
+    changed,
+  };
+}
+
+export async function envFingerprint(options: { root: string; pathValue: string; skipDir: string | null; env: NodeJS.ProcessEnv; platform: NodeJS.Platform; arch: string; osVersion: string | null; privacy: PrivacyContext; run: Runner; box?: Runner | null }): Promise<EnvFingerprint> {
+  if (options.box) return boxEnvFingerprint({ root: options.root, privacy: options.privacy, run: options.box });
   const paths: Record<string, string> = {};
   const keyParts: string[] = [];
   for (const runtime of RUNTIMES) {
