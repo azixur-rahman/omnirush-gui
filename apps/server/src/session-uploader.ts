@@ -1317,11 +1317,22 @@ function pathComponents(path: string): string[] {
   return path.replaceAll("\\", "/").split("/").filter(Boolean);
 }
 
-/** The unconditional denials that apply to any component, directories included. */
-function hasDeniedComponent(parts: string[]): boolean {
+// A `.env` template FILE (`.env.example`, `.env.sample`, ...): the variable
+// names a project needs, committed for others to copy. The files-used policy
+// (session-archive/files-used-policy.ts) and context/redact-policy.ts already
+// treat these templates as no credential; a turn that reads or edits one
+// cannot be replayed while the snapshot withholds it.
+const ENV_TEMPLATE = /^\.env\.(?:example|sample|template|dist|defaults?)$/;
+
+function isEnvTemplate(parts: string[]): boolean {
+  return ENV_TEMPLATE.test(parts.at(-1)?.toLowerCase() ?? "");
+}
+
+/** The unconditional denials that apply to any component, directories included. `keepEnvFile`: the last component is a `.env` template to keep. */
+function hasDeniedComponent(parts: string[], keepEnvFile = false): boolean {
   return parts.some((part, index) => {
     const lower = part.toLowerCase();
-    return lower.startsWith(".env")
+    return (lower.startsWith(".env") && !(keepEnvFile && index === parts.length - 1))
       || DENIED_EXACT_NAMES.has(lower)
       || DENIED_SUFFIXES.some((suffix) => lower.endsWith(suffix))
       || DENIED_CREDENTIAL_NAME.test(lower)
@@ -1358,8 +1369,22 @@ export function isUploadDirectoryDenied(path: string): boolean {
  * extension, in which case it is kept and scrubbed like any other source file.
  */
 export function isUploadPathDenied(path: string): boolean {
+  return uploadPathDenied(path, false);
+}
+
+/**
+ * The same rule for the snapshot's own files and git block, whose text is
+ * scrubbed before it leaves: there a `.env` template is kept (isEnvTemplate).
+ * Everything stored byte for byte (the project archive, files outside the
+ * workspace, attachments) keeps to isUploadPathDenied.
+ */
+export function isUploadFileDenied(path: string): boolean {
+  return uploadPathDenied(path, true);
+}
+
+function uploadPathDenied(path: string, scrubbed: boolean): boolean {
   const parts = pathComponents(path);
-  if (hasDeniedComponent(parts)) return true;
+  if (hasDeniedComponent(parts, scrubbed && isEnvTemplate(parts))) return true;
   const name = parts.at(-1)?.toLowerCase();
   if (!name || hasScrubbedExtension(name)) return false;
   return parts.some((part) => hasDeniedWords(part.toLowerCase()));
@@ -2777,7 +2802,7 @@ async function walkFallback(
       } else await walkFallback(root, fullPath, ignoreRules, listing, priorityPaths);
     } else if (entry.isFile() || entry.isSymbolicLink()) {
       // Capture v2: a symlink is listed too (never followed; the scan records its target).
-      if (isUploadPathDenied(path)) {
+      if (isUploadFileDenied(path)) {
         listing.denied += 1;
         if ((listing.deniedPaths ??= []).length < MAX_LISTED_EXCLUSIONS) listing.deniedPaths.push(path);
       } else listing.paths.push(path);
@@ -2792,7 +2817,7 @@ function filterListing(candidates: string[], priorityPaths: ReadonlySet<string> 
   let denied = 0;
   for (const path of candidates) {
     if (!path) continue;
-    if (isUploadPathDenied(path)) {
+    if (isUploadFileDenied(path)) {
       denied += 1;
       if (deniedPaths.length < MAX_LISTED_EXCLUSIONS) deniedPaths.push(path);
     } else eligible.push(path);
@@ -2965,7 +2990,7 @@ function parseGitStatus(raw: string, prefix = ""): { entries: GitStatusEntry[]; 
     const path = repoPath.slice(prefix.length);
     if (!path) continue;
     if (code !== "??" && code !== "!!") dirty = true;
-    if (isUploadPathDenied(path)) continue;
+    if (isUploadFileDenied(path)) continue;
     if (entries.length >= MAX_GIT_STATUS_ENTRIES) continue;
     const uploadPath = portablePathForUpload(path);
     if (uploadPath.length > MAX_GIT_PATH_CHARS) continue;
@@ -3067,7 +3092,7 @@ export function filterUploadDiff(raw: string, inputTruncated = false): { diff: s
     if (!section.startsWith("diff --git ")) continue;
     const headerEnd = section.indexOf("\n");
     const path = diffHeaderPath(headerEnd === -1 ? section : section.slice(0, headerEnd));
-    if (!path || isUploadPathDenied(path)) continue;
+    if (!path || isUploadFileDenied(path)) continue;
     if (/^(?:Binary files .* differ|GIT binary patch)/m.test(section)) continue;
     // Capture v2: a binary type is never diffed as text (its bytes go to the byte-exact archive), and
     // a section that was not valid UTF-8 (utf8DiffText) never reaches here.
@@ -5303,7 +5328,7 @@ export class SessionUploader {
     const path = workspaceRelativePath(state.root, prefix ? `${prefix}/${relative}` : relative);
     if (!path) return;
     this.reportTouched(state, path);
-    if (isUploadPathDenied(path)) return;
+    if (isUploadFileDenied(path)) return;
     if (path === ".gitignore" || path.endsWith("/.gitignore")) {
       // New ignore rules can hide or reveal any number of files: forget what
       // git answered so far and rescan the tree with the rules as they stand.
@@ -5666,7 +5691,7 @@ export class SessionUploader {
       state.turnWrittenPaths.set(path, Date.now());
       state.turnToolWrites.add(path);
     }
-    if (isUploadPathDenied(path) || state.touchedPaths.has(path)) return;
+    if (isUploadFileDenied(path) || state.touchedPaths.has(path)) return;
     state.touchedPaths.add(path);
     this.markDirty(state, path);
     this.queueChangedPath(state, path);
@@ -6377,7 +6402,7 @@ export class SessionUploader {
   private queueChangedPath(state: SessionState, filename: string): void {
     if (state.finished) return;
     const path = workspaceRelativePath(state.root, filename);
-    if (!path || isUploadPathDenied(path)) return;
+    if (!path || isUploadFileDenied(path)) return;
     // Several events for one path before its capture starts collapse into one read.
     if (state.pendingJournal.has(path)) return;
     state.pendingJournal.add(path);
@@ -6514,7 +6539,7 @@ export class SessionUploader {
       // listing vouches for (the paths a targeted scan inspects, and every
       // journal entry), in one batch: nothing git ignores now leaves the
       // machine, whatever it answered when the event arrived.
-      const reported = targeted && previous !== null ? [...dirty].filter((path) => !isUploadPathDenied(path)) : [];
+      const reported = targeted && previous !== null ? [...dirty].filter((path) => !isUploadFileDenied(path)) : [];
       const journaled = type === "change" || type === "end" ? [...state.changeJournal.values()] : [];
       const checked = [...new Set([...reported, ...journaled.map((entry) => entry.path)])];
       const ignored = checked.length > 0 ? await this.ignoredPaths(state, checked, true) : new Set<string>();

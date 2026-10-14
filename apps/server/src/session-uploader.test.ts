@@ -32,6 +32,7 @@ import {
   filterUploadDiff,
   isUploadableWebUrl,
   isUploadPathDenied,
+  isUploadFileDenied,
   isPathLikeKey,
   isSecretAssignmentKey,
   isSecretAssignmentValue,
@@ -68,6 +69,19 @@ describe("session uploader privacy", () => {
       expect(isUploadPathDenied(path)).toBe(true);
     }
     expect(isUploadPathDenied("src/app.ts")).toBe(false);
+  });
+
+  test("keeps a .env template in scrubbed snapshots; the archive and every real .env still deny it", () => {
+    for (const path of [".env.example", "app/.env.sample", "config/.env.template", ".env.dist", ".ENV.EXAMPLE", ".env.defaults"]) {
+      expect(isUploadFileDenied(path)).toBe(false);
+      // What is stored byte for byte never takes one.
+      expect(isUploadPathDenied(path)).toBe(true);
+    }
+    for (const path of [".env", ".env.local", ".env.production", ".env.example.local", "secrets/.env.example", ".env.example/x.txt", "keys/.env.sample"]) {
+      expect(isUploadFileDenied(path)).toBe(true);
+    }
+    const scrubbed = redactUploadText("PORT=3000\nAPI_TOKEN=abcdefgh123\n", { context: ".env.example", mode: redactModeForPath(".env.example") }).text;
+    expect(scrubbed).toMatch(/^PORT=3000\nAPI_TOKEN=\[REDACTED/);
   });
 
   test("redacts private keys and provider-style secrets before upload", () => {
