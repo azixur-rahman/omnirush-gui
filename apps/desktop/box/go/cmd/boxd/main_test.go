@@ -7,6 +7,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net"
 	"os"
@@ -156,6 +157,54 @@ func TestStatAndTar(t *testing.T) {
 	}
 	if kinds["a.txt"] != tar.TypeReg || kinds["hard"] != tar.TypeLink || kinds["link"] != tar.TypeSymlink || kinds["sub"] != tar.TypeDir || len(kinds) != 4 {
 		t.Fatalf("%v", kinds)
+	}
+}
+
+// The host client (src/box/client.js tarTo) splits a long path list into
+// several tar requests and joins their output into one file: it drops the
+// last 1024 bytes (archive/tar's two zero end blocks, no record padding) of
+// every tar but the last. This checks boxd's tar ends exactly that way.
+func TestTarEnd(t *testing.T) {
+	_, addr := startDaemon(t)
+	dir := t.TempDir()
+	var first, second []string
+	for i := 0; i < 6; i++ {
+		p := filepath.Join(dir, fmt.Sprintf("f%d.txt", i))
+		_ = os.WriteFile(p, bytes.Repeat([]byte{'a' + byte(i)}, 700*i+1), 0o644)
+		if i < 3 {
+			first = append(first, p)
+		} else {
+			second = append(second, p)
+		}
+	}
+	one := call(t, addr, proto.Request{Op: "tar", Paths: first}, nil)
+	two := call(t, addr, proto.Request{Op: "tar", Paths: second}, nil)
+	for _, res := range []result{one, two} {
+		if res.exit.Code != 0 || len(res.data)%512 != 0 || len(res.data) < 1024 || !bytes.Equal(res.data[len(res.data)-1024:], make([]byte, 1024)) {
+			t.Fatalf("code %d, %d bytes, tail not two zero blocks", res.exit.Code, len(res.data))
+		}
+	}
+	// Only the end blocks are zero blocks at a header position: the last
+	// member's data ends right before them.
+	joined := append(append([]byte(nil), one.data[:len(one.data)-1024]...), two.data...)
+	tr := tar.NewReader(bytes.NewReader(joined))
+	var names []string
+	for {
+		h, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		data, _ := io.ReadAll(tr)
+		if len(data) != int(h.Size) {
+			t.Fatalf("%s: %d of %d bytes", h.Name, len(data), h.Size)
+		}
+		names = append(names, filepath.Base(h.Name))
+	}
+	if strings.Join(names, ",") != "f0.txt,f1.txt,f2.txt,f3.txt,f4.txt,f5.txt" {
+		t.Fatalf("members %v", names)
 	}
 }
 

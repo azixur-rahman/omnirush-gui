@@ -34,6 +34,13 @@ const (
 // MaxFrame bounds one frame's payload.
 const MaxFrame = 1 << 20
 
+// MaxRequestLine bounds the first line of a connection (the newline not
+// counted). A tar request lists every path a checkpoint copies, ~100-150
+// bytes each: 64 MiB is about half a million paths. It was 4 MiB, and boxes
+// keep the boxd they were started or created with, so clients split longer
+// tar requests themselves and do not rely on this limit.
+const MaxRequestLine = 64 << 20
+
 // Request is the first line of a connection.
 type Request struct {
 	V     int               `json:"v"`
@@ -131,7 +138,7 @@ func WriteRequest(w io.Writer, req Request) error {
 // ReadRequest reads the first line (bounded) and checks the token.
 func ReadRequest(r *bufio.Reader, token string) (Request, error) {
 	var req Request
-	line, err := readLine(r, 4<<20)
+	line, err := readLine(r, MaxRequestLine)
 	if err != nil {
 		return req, err
 	}
@@ -156,7 +163,7 @@ func readLine(r *bufio.Reader, max int) ([]byte, error) {
 		}
 		out = append(out, chunk...)
 		if len(out) > max {
-			return nil, errors.New("request line too long")
+			return nil, fmt.Errorf("request line too long (over %d bytes)", max)
 		}
 		if !isPrefix {
 			return out, nil
