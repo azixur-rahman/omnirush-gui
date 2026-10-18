@@ -21,6 +21,27 @@ export type BoxReply = { exit: BoxExit; stdout: string; stderr: string; data: Bu
 export type BoxStat = { path: string; type: string; mode?: number; size?: number; uid?: number; gid?: number; link?: string; mtime_ns?: number | string; ctime_ns?: number | string };
 export type BoxChange = BoxStat & { kind: "A" | "C" | "D" };
 
+/**
+ * The most a tar request line may hold (bytes, newline included). boxd
+ * refused a first line over 4 MiB ("request line too long", box/go/proto;
+ * 64 MiB now, but a box keeps the boxd it was started or created with), and
+ * ~30k changed paths (a fresh node_modules) are past that. A longer list
+ * goes out in several requests (tarTo).
+ */
+export const TAR_REQUEST_MAX_BYTES = 2 * 1024 * 1024;
+
+/**
+ * How boxd ends a tar: archive/tar's Writer.Close writes two 512-byte zero
+ * blocks and no record padding (box/go/cmd/boxd writeTar). A batched tar
+ * drops it from every request but the last, so the file is one archive.
+ */
+export const TAR_END_BYTES = 1024;
+
+/** The first line of a connection for `req`, exactly as request() sends it. */
+export function requestLine(box: BoxEndpoint, req: BoxRequest): string {
+  return `${JSON.stringify({ v: PROTO_VERSION, token: box.token, ...req })}\n`;
+}
+
 function frame(kind: number, payload = Buffer.alloc(0)): Buffer {
   const head = Buffer.alloc(5);
   head[0] = kind;
@@ -59,7 +80,7 @@ export function request(
     signal?.addEventListener?.("abort", onAbort, { once: true });
     const timer = setTimeout(() => finish(reject, new Error(`box ${req.op} timed out after ${timeoutMs} ms`)), timeoutMs);
     socket.once("connect", () => {
-      socket.write(`${JSON.stringify({ v: PROTO_VERSION, token: box.token, ...req })}\n`);
+      socket.write(requestLine(box, req));
       if (req.op === "exec") socket.write(frame(T.stdinEof));
     });
     socket.on("error", (error) => finish(reject, error));
@@ -145,10 +166,51 @@ export async function walk(box: BoxEndpoint, roots: string[], { max = 400_000, t
 }
 
 /**
- * Tar exactly these paths into `file`: { bytes, sha256, ms, warning }. The
- * tar streams to disk: the box's connection waits while the file catches up.
+ * The tar requests for `paths`: one when its line fits in `maxBytes` (the
+ * paths as given, the request exactly as before), else consecutive slices of
+ * the paths in boxd's own order (byte order: it sorts each request), each
+ * request line at most `maxBytes`. Batches in that order make the same
+ * member order as one request would. A single path too long for a request
+ * of its own still gets one (boxd says whether it takes it).
  */
-export async function tarTo(box: BoxEndpoint, paths: string[], file: string, { timeoutMs = 15 * 60_000 }: { timeoutMs?: number } = {}): Promise<{ bytes: number; sha256: string; ms?: number; warning: string | null }> {
+export function tarBatches(box: BoxEndpoint, paths: string[], { maxBytes = TAR_REQUEST_MAX_BYTES }: { maxBytes?: number } = {}): string[][] {
+  if (Buffer.byteLength(requestLine(box, { op: "tar", paths })) <= maxBytes) return [paths];
+  const sorted = paths.map((p) => ({ p, b: Buffer.from(p, "utf8") })).sort((x, y) => Buffer.compare(x.b, y.b)).map(({ p }) => p);
+  // The line grows by each path's JSON plus a comma between paths.
+  const empty = Buffer.byteLength(requestLine(box, { op: "tar", paths: [] }));
+  const batches: string[][] = [];
+  let batch: string[] = [];
+  let size = empty;
+  for (const p of sorted) {
+    const own = Buffer.byteLength(JSON.stringify(p));
+    if (batch.length && size + 1 + own > maxBytes) {
+      batches.push(batch);
+      batch = [];
+      size = empty;
+    }
+    size += (batch.length ? 1 : 0) + own;
+    batch.push(p);
+  }
+  if (batch.length) batches.push(batch);
+  return batches;
+}
+
+export type TarResult = { bytes: number; sha256: string; ms: number; warning: string | null; batches: number; requestBytes: number };
+
+/**
+ * Tar exactly these paths into `file`: { bytes, sha256, ms, warning, batches,
+ * requestBytes }. The tar streams to disk: the box's connection waits while
+ * the file catches up. A path list too long for one request line goes out
+ * in several (tarBatches) into the same file: each batch's end-of-archive
+ * blocks are dropped but the last one's, so `file` is one tar; `bytes` and
+ * `sha256` describe that file, `warning` joins the batches' distinct ones,
+ * `ms` is boxd's time summed, `requestBytes` the longest request line.
+ * `timeoutMs` bounds the whole tar, however many requests it takes. A failed
+ * batch fails the call (`file` is then incomplete).
+ */
+export async function tarTo(box: BoxEndpoint, paths: string[], file: string, { timeoutMs = 15 * 60_000, maxRequestBytes = TAR_REQUEST_MAX_BYTES }: { timeoutMs?: number; maxRequestBytes?: number } = {}): Promise<TarResult> {
+  const batches = tarBatches(box, paths, { maxBytes: maxRequestBytes });
+  const deadline = Date.now() + timeoutMs;
   const stream = createWriteStream(file, { mode: 0o600 });
   const hash = createHash("sha256");
   const controller = new AbortController();
@@ -160,29 +222,61 @@ export async function tarTo(box: BoxEndpoint, paths: string[], file: string, { t
     controller.abort();
   });
   await once(stream, "open");
-  let result: BoxReply;
+  const write = (chunk: Buffer): Promise<unknown> | null => {
+    if (!chunk.length) return draining;
+    hash.update(chunk);
+    bytes += chunk.length;
+    // One drain wait at a time, however many frames arrive before it.
+    if (!stream.write(chunk) && !draining) {
+      draining = once(stream, "drain").finally(() => { draining = null; });
+      draining.catch(() => undefined); // a write error is `failed`
+    }
+    return draining;
+  };
+  const warnings: string[] = [];
+  let ms = 0;
+  let requestBytes = 0;
   try {
-    result = await request(box, { op: "tar", paths }, {
-      timeoutMs,
-      signal: controller.signal,
-      onData: (chunk) => {
-        const copy = Buffer.from(chunk);
-        hash.update(copy);
-        bytes += copy.length;
-        // One drain wait at a time, however many frames arrive before it.
-        if (!stream.write(copy) && !draining) {
-          draining = once(stream, "drain").finally(() => { draining = null; });
-          draining.catch(() => undefined); // a write error is `failed`
-        }
-        return draining;
-      },
-    });
-  } catch (error) {
-    throw failed ?? error;
+    for (let index = 0; index < batches.length; index += 1) {
+      const last = index === batches.length - 1;
+      const req: BoxRequest = { op: "tar", paths: batches[index] };
+      requestBytes = Math.max(requestBytes, Buffer.byteLength(requestLine(box, req)));
+      const left = deadline - Date.now();
+      if (left <= 0) throw new Error(`box tar timed out after ${timeoutMs} ms`);
+      // Every batch but the last holds back its final TAR_END_BYTES (the end blocks) until it ends.
+      let held: Buffer = Buffer.alloc(0);
+      let result: BoxReply;
+      try {
+        result = await request(box, req, {
+          timeoutMs: left,
+          signal: controller.signal,
+          onData: (chunk) => {
+            const copy = Buffer.from(chunk);
+            if (last) return write(copy);
+            const all = held.length ? Buffer.concat([held, copy]) : copy;
+            const keep = Math.min(TAR_END_BYTES, all.length);
+            held = Buffer.from(all.subarray(all.length - keep));
+            return write(all.subarray(0, all.length - keep));
+          },
+        });
+      } catch (error) {
+        if (failed) throw failed;
+        if (batches.length > 1 && error instanceof Error) error.message += ` (request ${index + 1} of ${batches.length})`;
+        throw error;
+      }
+      if (failed) throw failed;
+      const stderr = result.stderr.trim();
+      const where = batches.length > 1 ? ` (request ${index + 1} of ${batches.length})` : "";
+      if (result.exit.code !== 0) throw new Error(`box tar failed${where}: ${stderr || result.exit.code}`);
+      if (!last && (held.length !== TAR_END_BYTES || held.some((byte) => byte !== 0))) {
+        throw new Error(`box tar failed${where}: the tar did not end with its ${TAR_END_BYTES} zero bytes`);
+      }
+      if (stderr && !warnings.includes(stderr)) warnings.push(stderr);
+      ms += Number(result.exit.ms) || 0;
+    }
   } finally {
     await new Promise<void>((resolve) => stream.end(() => resolve()));
   }
   if (failed) throw failed;
-  if (result.exit.code !== 0) throw new Error(`box tar failed: ${result.stderr.trim() || result.exit.code}`);
-  return { bytes, sha256: hash.digest("hex"), ms: result.exit.ms, warning: result.stderr.trim() || null };
+  return { bytes, sha256: hash.digest("hex"), ms, warning: warnings.join("\n") || null, batches: batches.length, requestBytes };
 }

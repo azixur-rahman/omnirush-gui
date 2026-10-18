@@ -315,7 +315,7 @@ export type CheckpointSummary = {
   checkpoint: Record<string, unknown>;
   skipped: Array<{ path: string; size: number; reason: string }>;
   deps?: Record<string, unknown>;
-  stats: { source: string; diff_entries: number; kept: number; copied: number; removed: number; diff_ms: number; stat_ms: number; tar_ms: number; total_ms: number; warning?: string };
+  stats: { source: string; diff_entries: number; kept: number; copied: number; removed: number; diff_ms: number; stat_ms: number; tar_ms: number; total_ms: number; warning?: string; tar_requests?: number; tar_error?: string };
 };
 
 export type Checkpoint = {
@@ -522,13 +522,13 @@ export class Box {
    * `discard()` drops it (a turn that never came). Checkpoints are taken one
    * at a time. Resolves { summary, commit, discard }.
    */
-  checkpoint(dir: string, turn: number | null, opts: { label?: string | null; leaf?: boolean; sessionTurn?: number | null; deps?: boolean; tarMax?: number; depsMax?: number } = {}): Promise<Checkpoint> {
+  checkpoint(dir: string, turn: number | null, opts: { label?: string | null; leaf?: boolean; sessionTurn?: number | null; deps?: boolean; tarMax?: number; depsMax?: number; tarRequestMax?: number } = {}): Promise<Checkpoint> {
     const work = this.queue.then(() => this.takeCheckpoint(dir, turn, opts));
     this.queue = work.catch(() => undefined);
     return work;
   }
 
-  private async takeCheckpoint(dir: string, turn: number | null, { label: asked = null, leaf = false, sessionTurn = null, deps = this.env.OMNIRUSH_BOX_DEPS !== "off", tarMax = Number(this.env.OMNIRUSH_BOX_TAR_MAX) || TAR_MAX_BYTES, depsMax = Number(this.env.OMNIRUSH_BOX_DEPS_MAX) || DEPS_MAX_BYTES }: { label?: string | null; leaf?: boolean; sessionTurn?: number | null; deps?: boolean; tarMax?: number; depsMax?: number } = {}): Promise<Checkpoint> {
+  private async takeCheckpoint(dir: string, turn: number | null, { label: asked = null, leaf = false, sessionTurn = null, deps = this.env.OMNIRUSH_BOX_DEPS !== "off", tarMax = Number(this.env.OMNIRUSH_BOX_TAR_MAX) || TAR_MAX_BYTES, depsMax = Number(this.env.OMNIRUSH_BOX_DEPS_MAX) || DEPS_MAX_BYTES, tarRequestMax = Number(this.env.OMNIRUSH_BOX_TAR_REQUEST_MAX) || client.TAR_REQUEST_MAX_BYTES }: { label?: string | null; leaf?: boolean; sessionTurn?: number | null; deps?: boolean; tarMax?: number; depsMax?: number; tarRequestMax?: number } = {}): Promise<Checkpoint> {
     if (!this.ready || !this.endpoint) throw new Error(`the sandbox is ${this.state}`);
     const endpoint = this.endpoint;
     const t0 = Date.now();
@@ -600,7 +600,7 @@ export class Box {
     const skipped: Array<{ path: string; size: number; reason: string }> = [];
     let depBytes = 0;
     let total = 0;
-    const changed: string[] = [];
+    let changed: string[] = [];
     let depsCut = false;
     for (const p of [...candidates.filter((x) => !isDep(x)), ...candidates.filter(isDep)]) {
       const entry = sized.get(p);
@@ -614,12 +614,29 @@ export class Box {
       total += size;
       changed.push(p);
     }
-    const skippedSet = new Set(skipped.map((item) => item.path));
     const label = asked ?? `turn-${turn}`;
     const stage = path.join(dir, `.stage-${label}-${process.pid}-${randomBytes(3).toString("hex")}`);
     mkdirSync(stage, { recursive: true });
     let tarInfo: Awaited<ReturnType<typeof client.tarTo>> | null = null;
-    if (changed.length) tarInfo = await client.tarTo(endpoint, changed, path.join(stage, `${label}.tar`));
+    let tarError: string | null = null;
+    if (changed.length) {
+      try {
+        tarInfo = await client.tarTo(endpoint, changed, path.join(stage, `${label}.tar`), { maxRequestBytes: tarRequestMax });
+      } catch (error) {
+        // The turn goes on: this checkpoint carries no tar and lists what it
+        // could not copy (skipped, "tar_failed"); those paths keep no
+        // signature, so the next checkpoint copies them again.
+        tarError = firstLine(error instanceof Error ? error.message : String(error)) || "the tar failed";
+        this.log("warn", "box checkpoint tar failed; its paths are tried again at the next checkpoint", { label, paths: changed.length, error: tarError });
+        rmSync(path.join(stage, `${label}.tar`), { force: true });
+        for (const p of changed) {
+          const entry = sized.get(p);
+          skipped.push({ path: p, size: entry?.type === "file" ? entry.size ?? 0 : 0, reason: "tar_failed" });
+        }
+        changed = [];
+      }
+    }
+    const skippedSet = new Set(skipped.map((item) => item.path));
     const tTar = Date.now();
     // What a later checkpoint compares with: a path left out stays "unknown", so it is tried again.
     const signatures: Record<string, string> = {};
@@ -643,10 +660,10 @@ export class Box {
       checkpoint: { schema: RECORD_SCHEMA, id, parent, turn: turn ?? null, image: { ref: image.ref ?? null, digest: image.digest ?? null }, status: "complete", capturedAt: new Date().toISOString() },
       skipped,
       ...(depsInfo ? { deps: { ...depsInfo, bytes: depBytes, cut: depsCut } } : {}),
-      stats: { source, diff_entries: entries.length, kept: Object.keys(now).length, copied: changed.length, removed: removed.length, diff_ms: tDiff - t0, stat_ms: tStat - tDiff, tar_ms: tTar - tStat, total_ms: Date.now() - t0, ...(tarInfo?.warning ? { warning: tarInfo.warning } : {}) },
+      stats: { source, diff_entries: entries.length, kept: Object.keys(now).length, copied: changed.length, removed: removed.length, diff_ms: tDiff - t0, stat_ms: tStat - tDiff, tar_ms: tTar - tStat, total_ms: Date.now() - t0, ...(tarInfo?.warning ? { warning: tarInfo.warning } : {}), ...(tarInfo && tarInfo.batches > 1 ? { tar_requests: tarInfo.batches } : {}), ...(tarError ? { tar_error: tarError } : {}) },
     };
     writeJson(path.join(stage, `${label}.json`), summary, 0o600);
-    this.log("info", "box checkpoint", { label, full, copied: changed.length, removed: removed.length, bytes: summary.bytes, ms: summary.stats.total_ms });
+    this.log("info", "box checkpoint", { label, full, copied: changed.length, removed: removed.length, bytes: summary.bytes, ms: summary.stats.total_ms, ...(tarInfo && tarInfo.batches > 1 ? { tar_requests: tarInfo.batches, request_bytes: tarInfo.requestBytes } : {}), ...(tarError ? { tar_error: tarError } : {}) });
     let settled = false;
     const record = this.describe();
     return {
