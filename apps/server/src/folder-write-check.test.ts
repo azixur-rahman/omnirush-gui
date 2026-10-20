@@ -1,14 +1,17 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { chmodSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
-import os from "node:os";
-import path from "node:path";
+import { mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import os, { tmpdir } from "node:os";
+import path, { join } from "node:path";
 
 import {
   checkFolderWritable,
   classifyFailure,
   controlledFolderAccessOn,
   folderWriteGate,
+  isolatedBunArgs,
   probeInProcess,
+  probeWithEngine,
   readOnlyPrompt,
   resetFolderWriteGate,
   type FolderProbeOutcome,
@@ -136,6 +139,54 @@ describe("checkFolderWritable", () => {
     const result = await checkFolderWritable("/x", { engineBin: "/x/opencode", probeEngine: async () => null, probeLocal: () => { local += 1; return { ok: true }; } });
     expect(result).toEqual({ ok: true, via: "server" });
     expect(local).toBe(1);
+  });
+});
+
+describe("probeWithEngine", () => {
+  test("runs bun in a private folder: a bunfig.toml or .env in the temporary folder (or anywhere) is never read", async () => {
+    const shared = await mkdtemp(join(tmpdir(), "omnirush-shared-tmp-"));
+    const target = await mkdtemp(join(tmpdir(), "omnirush-probe-target-"));
+    const marker = join(shared, "marker");
+    await writeFile(join(shared, "bunfig.toml"), 'preload = ["./evil.ts"]\n');
+    await writeFile(join(shared, ".env"), "PROBE_PLANTED=yes\n");
+    await writeFile(join(shared, "evil.ts"), `import { appendFileSync } from "node:fs"; appendFileSync(${JSON.stringify(marker)}, "loaded " + (process.env.PROBE_PLANTED ?? "-") + "\\n");\n`);
+    const previous = process.env.TMPDIR;
+    try {
+      // The planted folder works: bun started there without the probe's options runs it.
+      const control = Bun.spawnSync([process.execPath, "-e", "0"], { cwd: shared, env: { ...process.env } });
+      expect(control.exitCode).toBe(0);
+      expect(await readFile(marker, "utf8")).toContain("loaded yes");
+      await rm(marker, { force: true });
+      // The probe, with the planted folder as the temporary folder: nothing of it is read.
+      process.env.TMPDIR = shared;
+      process.env.BUN_OPTIONS = `--preload=${join(shared, "evil.ts")}`;
+      const outcome = await probeWithEngine(target, process.execPath);
+      expect(outcome).toEqual({ ok: true });
+      expect(await readFile(marker, "utf8").catch(() => "")).toBe("");
+      // Its private folder is gone afterwards.
+      expect((await readdir(shared)).filter((name) => name.startsWith("probe-"))).toEqual([]);
+      // Under the app's user data folder when the desktop names one.
+      const userData = await mkdtemp(join(tmpdir(), "omnirush-user-data-"));
+      process.env.OMNIRUSH_DESKTOP_USER_DATA_DIR = userData;
+      try {
+        expect(await probeWithEngine(target, process.execPath)).toEqual({ ok: true });
+        expect(await readFile(marker, "utf8").catch(() => "")).toBe("");
+        expect(await readdir(join(userData, "write-check"))).toEqual([]);
+        expect((await stat(join(userData, "write-check"))).mode & 0o777).toBe(0o700);
+      } finally {
+        delete process.env.OMNIRUSH_DESKTOP_USER_DATA_DIR;
+        await rm(userData, { recursive: true, force: true });
+      }
+    } finally {
+      if (previous === undefined) delete process.env.TMPDIR; else process.env.TMPDIR = previous;
+      delete process.env.BUN_OPTIONS;
+      await rm(shared, { recursive: true, force: true });
+      await rm(target, { recursive: true, force: true });
+    }
+  });
+
+  test("names an empty bunfig of its own folder and no .env file", () => {
+    expect(isolatedBunArgs("/private/x")).toEqual(["--no-env-file", `--config=${join("/private/x", "bunfig.toml")}`]);
   });
 });
 

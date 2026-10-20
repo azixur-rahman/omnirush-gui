@@ -13,7 +13,7 @@
  * Kept in step with the CLI (omnirush-cli src/folder-write-check.js).
  */
 import { execFile, spawn } from "node:child_process";
-import { closeSync, fsyncSync, openSync, renameSync, statSync, unlinkSync, writeSync } from "node:fs";
+import { chmodSync, closeSync, fsyncSync, mkdirSync, mkdtempSync, openSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
@@ -94,8 +94,43 @@ export function probeInProcess(dir: string): FolderProbeOutcome {
   }
 }
 
+/**
+ * The engine binary run as bun reads a bunfig.toml (its `preload` runs code)
+ * and a .env from its working folder. The probe runs in a fresh private
+ * folder of its own (under the app's user data folder, else the temporary
+ * folder; 0700), with an empty bunfig the app writes there named on the
+ * command line and no .env file, so no other folder (a shared temporary
+ * folder, a project) adds anything to it. The same options as the CLI's
+ * helper runtime.
+ */
+export function isolatedBunArgs(folder: string): string[] {
+  return ["--no-env-file", `--config=${path.join(folder, "bunfig.toml")}`];
+}
+
+function isolatedBunFolder(env: NodeJS.ProcessEnv = process.env): string | null {
+  try {
+    const userData = env.OMNIRUSH_DESKTOP_USER_DATA_DIR?.trim();
+    const parent = userData ? path.join(userData, "write-check") : os.tmpdir();
+    if (userData) mkdirSync(parent, { recursive: true, mode: 0o700 });
+    const folder = mkdtempSync(path.join(parent, "probe-"));
+    chmodSync(folder, 0o700);
+    writeFileSync(path.join(folder, "bunfig.toml"), "", { mode: 0o600 });
+    return folder;
+  } catch {
+    return null;
+  }
+}
+
 /** The probe run by the engine binary; null when it could not run or said nothing usable. */
 export function probeWithEngine(dir: string, engineBin: string, timeoutMs = 15_000): Promise<FolderProbeOutcome | null> {
+  const folder = isolatedBunFolder();
+  if (!folder) return Promise.resolve(null);
+  return probeIn(folder, dir, engineBin, timeoutMs).finally(() => {
+    try { rmSync(folder, { recursive: true, force: true }); } catch { /* best effort */ }
+  });
+}
+
+function probeIn(folder: string, dir: string, engineBin: string, timeoutMs: number): Promise<FolderProbeOutcome | null> {
   return new Promise((resolve) => {
     let out = "";
     let done = false;
@@ -107,9 +142,12 @@ export function probeWithEngine(dir: string, engineBin: string, timeoutMs = 15_0
     };
     let child: ReturnType<typeof spawn>;
     try {
-      child = spawn(engineBin, ["-e", PROBE_SCRIPT], {
-        cwd: os.tmpdir(),
-        env: { ...process.env, BUN_BE_BUN: "1", OMNIRUSH_WRITE_CHECK_DIR: dir },
+      const env: NodeJS.ProcessEnv = { ...process.env, BUN_BE_BUN: "1", OMNIRUSH_WRITE_CHECK_DIR: dir };
+      // Extra command-line options bun would take from the environment.
+      delete env.BUN_OPTIONS;
+      child = spawn(engineBin, [...isolatedBunArgs(folder), "-e", PROBE_SCRIPT], {
+        cwd: folder,
+        env,
         stdio: ["ignore", "pipe", "ignore"],
         windowsHide: true,
       });
