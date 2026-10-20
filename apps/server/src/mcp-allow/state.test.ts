@@ -254,6 +254,17 @@ describe("MCP server environment", () => {
     expect(new Set(Object.values(out))).toEqual(new Set([""]));
   });
 
+  test("a server keeps uv, pip and npm settings, never their logins", () => {
+    const env = {
+      UV_CACHE_DIR: "/home/u/.cache/uv", UV_PYTHON: "3.12", PIP_CACHE_DIR: "/p", npm_config_cache: "/n", NPM_CONFIG_PREFIX: "/np", GIT_AUTHOR_EMAIL: "a@b",
+      UV_PUBLISH_TOKEN: "x", UV_INDEX_CORP_PASSWORD: "x", PIP_PASSWORD: "x", npm_config__authToken: "x", NPM_CONFIG__AUTH: "x",
+    };
+    expect(Object.keys(mcpServerEnvironment({ ...env, UV_KEYRING_PROVIDER: "subprocess", PIP_CLIENT_CERT_KEY: "x" }, {}, [], "linux")).sort()).toEqual(["NPM_CONFIG__AUTH", "PIP_CLIENT_CERT_KEY", "PIP_PASSWORD", "UV_INDEX_CORP_PASSWORD", "UV_KEYRING_PROVIDER", "UV_PUBLISH_TOKEN", "npm_config__authToken"]);
+    const more = { "npm_config_//registry.npmjs.org/:_authToken": "x", "npm_config_//host/:_password": "x", npm_config_authorization: "x", npm_config_otp: "123456", GIT_HTTP_PASS: "x", GIT_SSH_PASSPHRASE: "x", UV_INDEX_X_PASS: "x",
+      XDG_SESSION_TYPE: "wayland", GIT_AUTHOR_NAME: "A", LC_ALL: "C", npm_config_init_author_name: "A" };
+    expect(Object.keys(mcpServerEnvironment(more, {}, [], "linux")).sort()).toEqual(["GIT_HTTP_PASS", "GIT_SSH_PASSPHRASE", "UV_INDEX_X_PASS", "npm_config_//host/:_password", "npm_config_//registry.npmjs.org/:_authToken", "npm_config_authorization", "npm_config_otp"]);
+  });
+
   test("Windows: a server's own variable wins over the engine's whatever the case", () => {
     expect(mcpServerEnvironment({ memory_file_path: "C:\\other" }, { MEMORY_FILE_PATH: "C:\\work\\m" }, [], "win32")).toEqual({ MEMORY_FILE_PATH: "C:\\work\\m" });
   });

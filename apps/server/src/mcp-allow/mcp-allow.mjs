@@ -152,11 +152,14 @@ export const MCP_ENV_ALLOW = Object.freeze([
   // The desktop session, so a server can open a window (a headed browser on Linux).
   "DISPLAY", "WAYLAND_DISPLAY", "XAUTHORITY", "DBUS_SESSION_BUS_ADDRESS", "PLAYWRIGHT_BROWSERS_PATH",
 ]);
-// Locale, desktop folders, Volta and git's own settings (identity, config file, ssh, certificates).
-const MCP_ENV_ALLOW_PREFIX = /^(?:LC_|XDG_|VOLTA_|GIT_)/i;
-// Git settings that can carry a login or start a helper that hands one out (http.extraHeader through
-// GIT_CONFIG_*, an askpass or credential helper): empty for a server like every other variable.
-const MCP_ENV_GIT_CREDENTIAL = /^GIT_(?:ASKPASS$|CREDENTIAL|HTTP_EXTRAHEADER|CONFIG_PARAMETERS$|CONFIG_COUNT$|CONFIG_KEY_|CONFIG_VALUE_)|(?:^|_)(?:TOKEN|SECRET|PASSWORD|PASSWD|PASS|AUTH|CREDENTIALS?|ASKPASS|COOKIE|KEY)(?:_|$)/i;
+// Locale, desktop folders, Volta, git's own settings (identity, config file, ssh, certificates) and the
+// package tools' settings (uv, pip, npm: caches, mirrors, Python choice), which an empty value would break.
+// Like the proxy and index settings above, a mirror address among them may hold a user:pass@ login.
+const MCP_ENV_ALLOW_PREFIX = /^(?:LC_|XDG_|VOLTA_|GIT_|UV_|PIP_|NPM_CONFIG_)/i;
+// Among those, the names that can carry a login or start a helper that hands one out (http.extraHeader
+// through GIT_CONFIG_*, an askpass or credential helper, a publish token, an index password, npm's
+// _authToken): empty for a server like every other variable.
+const MCP_ENV_GIT_CREDENTIAL = /^GIT_(?:ASKPASS$|CREDENTIAL|HTTP_EXTRAHEADER|CONFIG_PARAMETERS$|CONFIG_COUNT$|CONFIG_KEY_|CONFIG_VALUE_)|TOKEN|SECRET|PASSW|PASSPHRASE|(?:^|_)PASS(?:_|$)|AUTH(?!OR(?!I[SZ]))|CREDENTIAL|COOKIE|KEY|ASKPASS|(?:^|_)OTP$/i;
 // Never reaches a server, whatever its rules say.
 const MCP_ENV_NEVER = /^(?:OMNIRUSH_|OPENCODE_SERVER_|OPENCODE_PASSWORD$)/i;
 
