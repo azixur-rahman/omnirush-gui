@@ -125,12 +125,15 @@ function isolatedBunFolder(env: NodeJS.ProcessEnv = process.env): string | null 
 export function probeWithEngine(dir: string, engineBin: string, timeoutMs = 15_000): Promise<FolderProbeOutcome | null> {
   const folder = isolatedBunFolder();
   if (!folder) return Promise.resolve(null);
-  return probeIn(folder, dir, engineBin, timeoutMs).finally(() => {
+  let exited: Promise<void> = Promise.resolve();
+  return probeIn(folder, dir, engineBin, timeoutMs, (closed) => { exited = closed; }).finally(async () => {
+    // A probe that timed out was killed: its folder goes once the process has ended (at most a few seconds).
+    await Promise.race([exited, new Promise<void>((resolveWait) => setTimeout(resolveWait, 5_000).unref?.())]);
     try { rmSync(folder, { recursive: true, force: true }); } catch { /* best effort */ }
   });
 }
 
-function probeIn(folder: string, dir: string, engineBin: string, timeoutMs: number): Promise<FolderProbeOutcome | null> {
+function probeIn(folder: string, dir: string, engineBin: string, timeoutMs: number, onSpawn: (closed: Promise<void>) => void): Promise<FolderProbeOutcome | null> {
   return new Promise((resolve) => {
     let out = "";
     let done = false;
@@ -155,6 +158,10 @@ function probeIn(folder: string, dir: string, engineBin: string, timeoutMs: numb
       resolve(null);
       return;
     }
+    onSpawn(new Promise<void>((resolveClosed) => {
+      child.once("close", () => resolveClosed());
+      child.once("error", () => resolveClosed());
+    }));
     const timer = setTimeout(() => {
       try { child.kill(); } catch { /* gone */ }
       finish(null);
@@ -315,7 +322,7 @@ export type CheckOptions = {
 
 /** Run the write check on a folder. Fails open (ok) only when no probe could run at all. */
 export async function checkFolderWritable(folder: string, options: CheckOptions = {}): Promise<FolderWriteResult> {
-  // The engine probe runs elsewhere (cwd: the temp folder): the folder goes to it absolute.
+  // The engine probe runs elsewhere (cwd: a private folder of its own): the folder goes to it absolute.
   const platform = options.platform ?? process.platform;
   const dir = (platform === "win32" ? path.win32 : path.posix).resolve(folder);
   const env = options.env ?? process.env;
