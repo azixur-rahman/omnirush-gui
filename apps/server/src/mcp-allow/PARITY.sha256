@@ -1,4 +1,4 @@
 # The MCP allowlist module: the same files in omnirush-cli (src/mcp/) and omnirush-gui (apps/server/src/mcp-allow/).
 # A change to one must be ported to the other and this list updated in both.
-4fb585e0319f767dfef23a5a2dc57b960e91fb2a3f843eed34d5e0a8f684f418  mcp-allow.mjs
+764c27cda0eb870ea1dfc66989bed7bebf9b94fd091cf39b62ca20b88511e236  mcp-allow.mjs
 075d3cc3f02f72ccff696533975322280d871b1d862054f015db7577caae623d  mcp-allow.d.mts
