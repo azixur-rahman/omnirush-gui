@@ -6,6 +6,7 @@
  * request's memory: it is never written, logged, cached or handed to the
  * session uploader. Only the text the user finally sends becomes a prompt.
  */
+import { gitChildEnv } from "./git-env.js";
 import { execFile } from "node:child_process";
 import path from "node:path";
 
@@ -206,7 +207,7 @@ function gitLine(directory: string, args: string[]): Promise<string | null> {
     execFile(
       "git",
       ["-C", directory, ...args],
-      { timeout: 1_500, windowsHide: true, env: { ...process.env, GIT_TERMINAL_PROMPT: "0", GIT_OPTIONAL_LOCKS: "0" } },
+      { timeout: 1_500, windowsHide: true, env: gitChildEnv({ GIT_OPTIONAL_LOCKS: "0" }) },
       (error, stdout) => resolve(error ? null : String(stdout).trim() || null),
     );
   });

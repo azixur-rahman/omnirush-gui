@@ -1,4 +1,5 @@
 import { permissionSetupSettings, type ApprovalMode } from "./approval-mode.js";
+import { gitChildEnv } from "./git-env.js";
 import { createHash, randomBytes } from "node:crypto";
 import { execFile, spawn } from "node:child_process";
 import { createReadStream, createWriteStream, watch, type FSWatcher, type WriteStream } from "node:fs";
@@ -2495,7 +2496,7 @@ function gitIgnoredPathsNow(root: string, paths: string[]): Promise<Set<string> 
       child = spawn("git", ["-C", root, "check-ignore", "--no-index", "-z", "--stdin"], {
         stdio: ["pipe", "pipe", "ignore"],
         windowsHide: true,
-        env: { ...process.env, GIT_TERMINAL_PROMPT: "0", GIT_OPTIONAL_LOCKS: "0" },
+        env: gitChildEnv({ GIT_OPTIONAL_LOCKS: "0" }),
       });
     } catch {
       resolvePromise(null);
@@ -2873,6 +2874,7 @@ const MAX_NESTED_REPO_PATHS = MAX_RAW_LISTING_FILES;
 
 async function gitListing(dir: string): Promise<string[]> {
   const { stdout } = await execFileAsync("git", ["-C", dir, "ls-files", "-co", "--exclude-standard", "-z"], {
+    env: gitChildEnv(),
     encoding: "buffer",
     maxBuffer: 16 * 1024 * 1024,
     timeout: 15_000,
@@ -2973,7 +2975,7 @@ function runGitNow(root: string, args: string[], options: { maxBytes: number; ti
       child = spawn("git", ["-C", root, "-c", "core.quotePath=false", "-c", "core.fsmonitor=false", "-c", `safe.directory=${resolve(root)}`, ...args], {
         stdio: ["ignore", "pipe", "ignore"],
         windowsHide: true,
-        env: { ...captureGitEnv(), GIT_CEILING_DIRECTORIES: process.env.GIT_CEILING_DIRECTORIES ?? "", LC_ALL: process.env.LC_ALL ?? "" },
+        env: { ...captureGitEnv(gitChildEnv()), GIT_CEILING_DIRECTORIES: process.env.GIT_CEILING_DIRECTORIES ?? "", LC_ALL: process.env.LC_ALL ?? "" },
       });
     } catch {
       finish(false);
@@ -3281,6 +3283,7 @@ async function listUntrackedFiles(root: string): Promise<string[]> {
   try {
     if (await gitSkipReason()) throw new Error(XCODE_CLT_MISSING);
     const { stdout } = await execFileAsync("git", ["-C", root, "ls-files", "--others", "--exclude-standard", "-z"], {
+      env: gitChildEnv(),
       encoding: "buffer",
       maxBuffer: 16 * 1024 * 1024,
       timeout: 15_000,
@@ -3304,6 +3307,7 @@ async function listIgnoredOutputFiles(root: string): Promise<string[]> {
   const listed = async (args: string[]): Promise<string[]> => {
     if (await gitSkipReason()) throw new Error(XCODE_CLT_MISSING);
     const { stdout } = await execFileAsync("git", ["-C", root, "ls-files", "--others", "--ignored", "--exclude-standard", "-z", ...args], {
+      env: gitChildEnv(),
       encoding: "buffer",
       maxBuffer: 16 * 1024 * 1024,
       timeout: 15_000,
@@ -5067,7 +5071,7 @@ export class SessionUploader {
       let gitVersion: string | null = null;
       try {
         if (await gitSkipReason()) throw new Error(XCODE_CLT_MISSING);
-        const { stdout } = await execFileAsync("git", ["--version"], { timeout: 5_000, maxBuffer: 16 * 1024 });
+        const { stdout } = await execFileAsync("git", ["--version"], { timeout: 5_000, maxBuffer: 16 * 1024, env: gitChildEnv() });
         gitVersion = String(stdout).trim().replace(/^git version\s+/i, "") || null;
       } catch {
         gitVersion = null;

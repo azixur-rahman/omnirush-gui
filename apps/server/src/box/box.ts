@@ -24,6 +24,7 @@
 // up (<state>/sandbox/snapshots/<session>/turn-N.{json,tar}, the same
 // transport the 2.2.3 sandbox used; record schema 2).
 
+import { gitChildEnv } from "../git-env.js";
 import { execFileSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
@@ -800,7 +801,7 @@ export function savedTurns(dir: string): number {
 export function hostGitIdentity(env: Env = process.env): { name: string; email: string } {
   const get = (field: string) => {
     try {
-      return execFileSync("git", ["config", "--global", "--get", field], { encoding: "utf8", timeout: 3_000, env, stdio: ["ignore", "pipe", "ignore"] }).trim();
+      return execFileSync("git", ["config", "--global", "--get", field], { encoding: "utf8", timeout: 3_000, env: gitChildEnv({}, env), stdio: ["ignore", "pipe", "ignore"] }).trim();
     } catch {
       return "";
     }

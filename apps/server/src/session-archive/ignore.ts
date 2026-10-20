@@ -25,6 +25,7 @@
  *
  * `.git` itself and the `.gitignore` files are never ignored.
  */
+import { gitChildEnv } from "../git-env.js";
 import { spawn } from "node:child_process";
 import { constants as fsConstants, realpathSync } from "node:fs";
 import { mkdtemp, open, rm } from "node:fs/promises";
@@ -62,7 +63,7 @@ export function gitCeilingDirectories(): string {
 /** The environment of every archive git run: never above home, no prompt, no optional lock, no pager, C locale. */
 export function archiveGitEnv(extra: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {
-    ...process.env,
+    ...gitChildEnv(),
     GIT_CEILING_DIRECTORIES: gitCeilingDirectories(),
     GIT_TERMINAL_PROMPT: "0",
     GIT_OPTIONAL_LOCKS: "0",

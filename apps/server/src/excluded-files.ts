@@ -16,6 +16,7 @@
 // per-snapshot read budget, and a hash is reused while the file's size,
 // mtime and inode stay the same.
 
+import { gitChildEnv } from "./git-env.js";
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
 import { createReadStream } from "node:fs";
@@ -127,7 +128,7 @@ export async function listGitIgnored(root: string): Promise<string[]> {
   return new Promise((resolvePromise) => {
     execFile("git", ["-C", root, "ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "-z"], {
       encoding: "buffer", maxBuffer: 16 * 1024 * 1024, timeout: 15_000, windowsHide: true,
-      env: { ...process.env, GIT_TERMINAL_PROMPT: "0", GIT_OPTIONAL_LOCKS: "0" },
+      env: gitChildEnv({ GIT_OPTIONAL_LOCKS: "0" }),
     }, (error, stdout) => {
       if (error) return resolvePromise([]);
       resolvePromise(Buffer.from(stdout).toString("utf8").split("\0").filter(Boolean).slice(0, MAX_GITIGNORED_LISTED));

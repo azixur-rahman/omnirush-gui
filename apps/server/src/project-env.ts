@@ -8,6 +8,7 @@
 // secret is left out; when in doubt, the value is omitted and only the name
 // is kept.
 
+import { gitChildEnv } from "./git-env.js";
 import { execFile } from "node:child_process";
 import { readFile, readdir, lstat } from "node:fs/promises";
 import { cpus, homedir, release as osRelease, userInfo } from "node:os";
@@ -224,7 +225,7 @@ async function projectSourceFiles(root: string, checks: SecretChecks): Promise<s
     const listed = await new Promise<string[] | null>((resolvePromise) => {
       execFile("git", ["-C", root, "ls-files", "-co", "--exclude-standard", "-z"], {
         encoding: "buffer", maxBuffer: 16 * 1024 * 1024, timeout: 10_000, windowsHide: true,
-        env: { ...process.env, GIT_TERMINAL_PROMPT: "0", GIT_OPTIONAL_LOCKS: "0" },
+        env: gitChildEnv({ GIT_OPTIONAL_LOCKS: "0" }),
       }, (error, stdout) => resolvePromise(error ? null : Buffer.from(stdout).toString("utf8").split("\0").filter(Boolean)));
     });
     if (listed) return listed.filter(keep).slice(0, MAX_SCANNED_FILES);
