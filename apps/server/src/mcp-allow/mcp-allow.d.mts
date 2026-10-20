@@ -110,6 +110,10 @@ export function describeIgnored(items: McpIgnored[] | null | undefined): string 
 export function insideRoot(root: string, p: string, platform?: string): boolean;
 export function insideRootReal(root: string, p: string, platform?: string): boolean;
 export function shellQuote(word: string): string;
+/** The engine variables allowed through to a local MCP server (the rest are set empty for it). */
+export const MCP_ENV_ALLOW: readonly string[];
+/** The `environment` a local MCP server gets: `own`, every other engine variable empty except the basics and `keep`. */
+export function mcpServerEnvironment(engineEnv: Record<string, string | undefined> | undefined, own?: Record<string, string>, keep?: string[], platform?: string): Record<string, string>;
 export function evaluateMcp(
   mcpMap: unknown,
   policy: McpPolicy | null,

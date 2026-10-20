@@ -5,7 +5,7 @@ import path from "node:path";
 
 import omnirushMcpPolicy from "../opencode-plugins/omnirush-mcp-policy.js";
 import { keyOf } from "../box/plugin-lib.js";
-import { describeIgnored, readPolicyFile } from "./mcp-allow.mjs";
+import { describeIgnored, evaluateMcp, mcpServerEnvironment, normalizePolicy, readPolicyFile } from "./mcp-allow.mjs";
 import {
   decideMcpEntry,
   mcpEngineEnv,
@@ -185,7 +185,9 @@ describe("the engine plugin (omnirush-mcp-policy)", () => {
     const entry = (output.mcp as Record<string, { command: string[]; environment: Record<string, string> }>).filesystem!;
     expect(entry.command[0]).toBe(path.join(home, "shell", process.platform === "win32" ? "bash.exe" : "bash"));
     expect(entry.command.slice(1)).toEqual(["-c", "mkdir -p /tmp/omnirush-mcp-npx && exec npx --prefix /tmp/omnirush-mcp-npx -y @modelcontextprotocol/server-filesystem@2026.8.31 ."]);
-    expect(entry.environment).toEqual({ OMNIRUSH_BOX_KEY: key });
+    // Its box key, and every other engine variable empty for it (mcpServerEnvironment).
+    expect(entry.environment.OMNIRUSH_BOX_KEY).toBe(key);
+    expect(Object.entries(entry.environment).filter(([name, value]) => !name.startsWith("OMNIRUSH_BOX_") && value !== "" && !["PATH", "HOME"].includes(name.toUpperCase()))).toEqual([]);
     expect(mcpServersInUse(workspaceMcpReport(state, root))?.[0]?.sandbox).toBe(true);
   });
 
@@ -203,3 +205,50 @@ describe("the engine plugin (omnirush-mcp-policy)", () => {
   });
 });
 
+describe("MCP server environment", () => {
+  test("the app's tokens, the engine's password and other keys are empty for a server; the basics stay", () => {
+    const policy = normalizePolicy(policyFixture);
+    const engineEnv = {
+      PATH: "/usr/bin", HOME: "/home/u", LANG: "C.UTF-8", LC_ALL: "C", HTTPS_PROXY: "http://proxy:3128",
+      OMNIRUSH_ACCESS_TOKEN: "engine-token", OMNIRUSH_SERVER_TOKEN: "server-token", OMNIRUSH_POLICY_TOKEN: "policy-token",
+      OPENCODE_SERVER_PASSWORD: "pw", OPENCODE_SERVER_USERNAME: "u", AWS_SECRET_ACCESS_KEY: "aws", GITHUB_TOKEN: "gh", NODE_OPTIONS: "--require /tmp/x.js",
+    };
+    const { mcp } = evaluateMcp({ filesystem: { type: "local", command: ["npx", "-y", "@modelcontextprotocol/server-filesystem", "."] } }, policy,
+      { root: "/work/app", platform: "linux", npmPrefix: "/state/npx", resolveRunner: (runner: string) => runner, env: engineEnv });
+    const environment = (mcp as Record<string, { environment?: Record<string, string> }>).filesystem!.environment!;
+    for (const secret of ["OMNIRUSH_ACCESS_TOKEN", "OMNIRUSH_SERVER_TOKEN", "OMNIRUSH_POLICY_TOKEN", "OPENCODE_SERVER_PASSWORD", "OPENCODE_SERVER_USERNAME", "AWS_SECRET_ACCESS_KEY", "GITHUB_TOKEN", "NODE_OPTIONS"]) {
+      expect([secret, environment[secret]]).toEqual([secret, ""]);
+    }
+    for (const basic of ["PATH", "HOME", "LANG", "LC_ALL", "HTTPS_PROXY"]) expect(environment).not.toHaveProperty(basic);
+  });
+
+  test("a protected name stays empty even when a server's rules name it; the rules drop such names", () => {
+    expect(mcpServerEnvironment({ OMNIRUSH_ACCESS_TOKEN: "t", PATH: "/usr/bin" }, { OMNIRUSH_ACCESS_TOKEN: "/work/app/x", MEMORY_FILE_PATH: "/work/app/m" }, ["OPENCODE_SERVER_PASSWORD"], "linux"))
+      .toEqual({ OMNIRUSH_ACCESS_TOKEN: "", MEMORY_FILE_PATH: "/work/app/m" });
+    const block = JSON.parse(JSON.stringify(policyFixture)) as { allow: Array<{ rules?: Record<string, unknown> }> };
+    block.allow[0]!.rules = { ...(block.allow[0]!.rules ?? {}), path_env: { OMNIRUSH_ACCESS_TOKEN: "x", MEMORY_FILE_PATH: "m.jsonl" }, secret_env: ["OMNIRUSH_SERVER_TOKEN", "SOME_API_KEY"] };
+    const rules = normalizePolicy(block)!.allow[0]!.rules as { path_env?: Record<string, string>; secret_env?: string[] };
+    expect(rules.path_env).toEqual({ MEMORY_FILE_PATH: "m.jsonl" });
+    expect(rules.secret_env).toEqual(["SOME_API_KEY"]);
+  });
+
+  test("a sandboxed server's box shell keeps its own box settings, and its key", () => {
+    const policy = normalizePolicy(policyFixture);
+    const env = { OMNIRUSH_BOX_HOME: "/custom/box-home", OMNIRUSH_BOX_TIMING_LOG: "/tmp/t.log", OMNIRUSH_ACCESS_TOKEN: "t", PATH: "/usr/bin" };
+    const { mcp } = evaluateMcp({ filesystem: { type: "local", command: ["npx", "-y", "@modelcontextprotocol/server-filesystem", "."] } }, policy,
+      { root: "/work/app", platform: "linux", npmPrefix: "/state/npx", resolveRunner: (runner: string) => runner, env, box: { shell: "/custom/box-home/shell/bash", key: "k1", croot: "/workspace/app" } });
+    const environment = (mcp as Record<string, { environment?: Record<string, string> }>).filesystem!.environment!;
+    expect(environment).toMatchObject({ OMNIRUSH_BOX_HOME: "/custom/box-home", OMNIRUSH_BOX_TIMING_LOG: "/tmp/t.log", OMNIRUSH_BOX_KEY: "k1", OMNIRUSH_ACCESS_TOKEN: "" });
+  });
+
+  test("Windows: mixed-case names are matched whatever their case", () => {
+    expect(mcpServerEnvironment({ Path: "C:\\Windows", SystemRoot: "C:\\Windows", Omnirush_Access_Token: "t", opencode_server_password: "p", Aws_Secret: "a" }, {}, [], "win32"))
+      .toEqual({ Omnirush_Access_Token: "", opencode_server_password: "", Aws_Secret: "" });
+  });
+
+  test("a server's own key (secret_env) stays; Windows names match whatever their case", () => {
+    expect(mcpServerEnvironment({ FIGMA_API_KEY: "k", OMNIRUSH_ACCESS_TOKEN: "t", OTHER_KEY: "o" }, { FRAMELINK_TELEMETRY: "off" }, ["FIGMA_API_KEY", "OMNIRUSH_ACCESS_TOKEN"], "linux"))
+      .toEqual({ OMNIRUSH_ACCESS_TOKEN: "", OTHER_KEY: "", FRAMELINK_TELEMETRY: "off" });
+    expect(mcpServerEnvironment({ Path: "C:\\Windows", SystemRoot: "C:\\Windows", OMNIRUSH_ACCESS_TOKEN: "t" }, {}, [], "win32")).toEqual({ OMNIRUSH_ACCESS_TOKEN: "" });
+  });
+});

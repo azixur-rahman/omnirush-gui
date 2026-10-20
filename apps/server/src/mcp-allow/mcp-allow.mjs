@@ -131,6 +131,51 @@ export function validRange(range) {
 
 // -------------------------------------------------------------------- policy
 
+// The variables a local MCP server sees from the engine's own environment: what a program needs to
+// start on this computer, and the network's proxy, certificate and package registry settings. The
+// engine starts a server with its whole environment plus the entry's `environment`, so every other
+// variable it has (the app's tokens, the engine's password, the person's other keys) is set empty for
+// the server (mcpServerEnvironment). The server's own path_env / fixed_env and the key its rules name
+// (secret_env) are added on top.
+export const MCP_ENV_ALLOW = Object.freeze([
+  "PATH", "HOME", "USER", "LOGNAME", "SHELL", "TMPDIR", "TMP", "TEMP", "LANG", "LANGUAGE", "TZ", "TERM", "COLORTERM",
+  "SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT", "USERPROFILE", "USERNAME", "USERDOMAIN", "APPDATA", "LOCALAPPDATA", "PROGRAMDATA",
+  "PROGRAMFILES", "PROGRAMFILES(X86)", "PROGRAMW6432", "COMMONPROGRAMFILES", "COMMONPROGRAMFILES(X86)", "HOMEDRIVE", "HOMEPATH",
+  "SYSTEMDRIVE", "ALLUSERSPROFILE", "PUBLIC", "COMPUTERNAME", "OS", "NUMBER_OF_PROCESSORS", "PROCESSOR_ARCHITECTURE", "__CF_USER_TEXT_ENCODING",
+  // Kept as they are, even when a proxy address carries its own login: the server's package
+  // manager needs the network's proxy, and the person set it for every program on this computer.
+  "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "ALL_PROXY",
+  "NODE_EXTRA_CA_CERTS", "SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE",
+  "NPM_CONFIG_REGISTRY", "NPM_CONFIG_CAFILE", "NPM_CONFIG_PROXY", "NPM_CONFIG_HTTPS_PROXY", "NPM_CONFIG_NOPROXY", "NPM_CONFIG_STRICT_SSL",
+  "UV_INDEX_URL", "UV_DEFAULT_INDEX", "UV_NATIVE_TLS", "PIP_INDEX_URL",
+]);
+const MCP_ENV_ALLOW_PREFIX = /^(?:LC_|XDG_)/i;
+// Never reaches a server, whatever its rules say.
+const MCP_ENV_NEVER = /^(?:OMNIRUSH_|OPENCODE_SERVER_|OPENCODE_PASSWORD$)/i;
+
+/**
+ * The `environment` a local MCP server gets from the app: `own` (its
+ * path_env / fixed_env values), every other variable of `engineEnv` set empty
+ * (the engine merges its own environment under it), except the allowed
+ * basics (MCP_ENV_ALLOW) and the keys in `keep` (the server's secret_env).
+ */
+export function mcpServerEnvironment(engineEnv, own = {}, keep = [], platform = process.platform) {
+  const norm = (k) => (platform === "win32" ? k.toUpperCase() : k);
+  const allowed = new Set(MCP_ENV_ALLOW.map((k) => k.toUpperCase()));
+  const kept = new Set(keep.filter((k) => !MCP_ENV_NEVER.test(k)).map(norm));
+  const out = {};
+  for (const key of Object.keys(engineEnv ?? {})) {
+    if (Object.hasOwn(own, key)) continue;
+    const upper = key.toUpperCase();
+    const basic = (allowed.has(upper) || MCP_ENV_ALLOW_PREFIX.test(key)) && !MCP_ENV_NEVER.test(key);
+    if (basic || kept.has(norm(key))) continue;
+    out[key] = "";
+  }
+  // A name the app keeps from every server is empty even when the server's own variables name it.
+  for (const [key, value] of Object.entries(own)) out[key] = MCP_ENV_NEVER.test(key) ? "" : value;
+  return out;
+}
+
 function normalizeRules(value) {
   const rules = isRecord(value) ? value : {};
   const out = {};
@@ -151,14 +196,14 @@ function normalizeRules(value) {
   }
   if (isRecord(rules.path_env)) {
     const env = Object.fromEntries(Object.entries(rules.path_env)
-      .filter(([k, v]) => /^[A-Z_][A-Z0-9_]{0,63}$/.test(k) && typeof v === "string" && v.length < 200 && !path.isAbsolute(v) && !v.split(/[\\/]/).includes(".."))
+      .filter(([k, v]) => !MCP_ENV_NEVER.test(k) && /^[A-Z_][A-Z0-9_]{0,63}$/.test(k) && typeof v === "string" && v.length < 200 && !path.isAbsolute(v) && !v.split(/[\\/]/).includes(".."))
       .slice(0, 8));
     if (Object.keys(env).length) out.path_env = env;
   }
   if (rules.local_urls === true) out.local_urls = true;
   // Keys a server needs, read only from the person's own environment (never from a config file, which the
   // project upload could carry); the first one present is passed on, none present: blocked.
-  const secrets = strings(rules.secret_env, 4).filter((k) => /^[A-Z_][A-Z0-9_]{0,63}$/.test(k));
+  const secrets = strings(rules.secret_env, 4).filter((k) => /^[A-Z_][A-Z0-9_]{0,63}$/.test(k) && !MCP_ENV_NEVER.test(k));
   if (secrets.length) out.secret_env = secrets;
   const inputs = strings(rules.path_inputs, 16).filter((k) => /^[A-Za-z_][\w]{0,63}$/.test(k));
   if (inputs.length) out.path_inputs = inputs;
@@ -686,11 +731,16 @@ export function evaluateMcp(mcpMap, policy, ctx = {}) {
     if (boxHere) {
       const envWords = Object.entries(environment).map(([k, v]) => `${k}=${shellQuote(v)}`);
       next.command = [box.shell, "-c", `${entry.runtime === "npm" ? `mkdir -p ${BOX_NPM_PREFIX} && ` : ""}exec ${envWords.length ? `env ${envWords.join(" ")} ` : ""}${argv.map(shellQuote).join(" ")}`];
-      next.environment = { OMNIRUSH_BOX_KEY: box.key };
+      // The box shell needs its key; the engine's other variables are empty for it (mcpServerEnvironment).
+      // Its own settings (OMNIRUSH_BOX_HOME and the like: where the box lives, not a credential) stay too.
+      const boxVars = Object.fromEntries(Object.entries(userEnv).filter(([k, v]) => /^OMNIRUSH_BOX_/i.test(k) && typeof v === "string"));
+      next.environment = { ...mcpServerEnvironment(userEnv, {}, [], platform), ...boxVars, OMNIRUSH_BOX_KEY: box.key };
       notes.push("runs in the sandbox");
     } else {
       next.command = argv;
-      if (Object.keys(environment).length) next.environment = environment; else delete next.environment;
+      // The engine's tokens and the person's other keys never reach the server (mcpServerEnvironment).
+      next.environment = mcpServerEnvironment(userEnv, environment, secretNames, platform);
+      if (!Object.keys(next.environment).length) delete next.environment;
     }
     if (secretNames.length) notes.push(`uses ${secretNames[0]} from your environment`);
     out[entry.id] = next;
