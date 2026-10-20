@@ -31,6 +31,7 @@
  *   - a plain-folder or touched-files chain never read git at all: every
  *     v2 state reads the repositories, whatever the chain's marker.
  */
+import { gitChildEnv } from "../git-env.js";
 import { spawn } from "node:child_process";
 import { realpathSync } from "node:fs";
 import { lstat, readFile } from "node:fs/promises";
@@ -154,7 +155,7 @@ function spawnRepoGit(
       ...(options.safeDirectory ? ["-c", `safe.directory=${options.safeDirectory}`] : []),
     ];
     try {
-      child = spawn("git", ["-C", cwd, ...config, ...args], { stdio: ["ignore", "pipe", "pipe"], windowsHide: true, env: captureGitEnv() });
+      child = spawn("git", ["-C", cwd, ...config, ...args], { stdio: ["ignore", "pipe", "pipe"], windowsHide: true, env: captureGitEnv(gitChildEnv()) });
     } catch {
       finish(false, true);
       return;

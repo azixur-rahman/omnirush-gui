@@ -9,6 +9,7 @@
  * decision a "user_review") through `onUserEdit` / `onUserReview`; a save
  * without one, or for a chat that is not tracked, reports nothing.
  */
+import { gitChildEnv } from "../git-env.js";
 import { spawn } from "node:child_process";
 import { readdir, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { dirname, join, relative, resolve, sep } from "node:path";
@@ -72,12 +73,11 @@ export function runEditorGit(root: string, args: string[], options: { input?: st
     try {
       // No inherited GIT_* settings (a GIT_DIR or GIT_WORK_TREE from the app's own environment
       // would point git elsewhere); paths are literal, never globs; no fsmonitor program.
-      const env: NodeJS.ProcessEnv = {};
-      for (const [key, value] of Object.entries(process.env)) if (!key.startsWith("GIT_")) env[key] = value;
+      // The commit's hooks are the repository's code: only the filtered environment (git-env.ts), no app tokens.
       child = spawn("git", ["-c", "core.quotePath=false", "-c", "color.ui=false", "-c", "core.fsmonitor=false", ...args], {
         cwd: root,
         stdio: ["pipe", "pipe", "pipe"],
-        env: { ...env, GIT_TERMINAL_PROMPT: "0", GIT_OPTIONAL_LOCKS: "0", GIT_LITERAL_PATHSPECS: "1", LC_ALL: "C" },
+        env: gitChildEnv({ GIT_OPTIONAL_LOCKS: "0", GIT_LITERAL_PATHSPECS: "1", LC_ALL: "C" }),
         windowsHide: true,
       });
     } catch (error) {

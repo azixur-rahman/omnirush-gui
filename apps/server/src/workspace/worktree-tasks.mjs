@@ -52,13 +52,37 @@ const FINISHED = new Set(["done", "failed", "stopped"]);
 const GIT_TIMEOUT_MS = 60_000;
 const MAX_BUFFER = 64 * 1024 * 1024;
 
+// The environment git gets. Git runs the repository's hooks (worktree add runs post-checkout, commit runs
+// pre-commit and commit-msg, merge runs its hooks): a hook is the repository's code and must not see the app's
+// tokens, the engine's password or other keys. Kept: what a local MCP server gets (the basics a program needs,
+// locale, proxy / certificate / registry settings), git's own settings that carry no credential, and the
+// ssh-agent socket (signed commits).
+const GIT_ENV_KEEP = new Set([
+  "PATH", "HOME", "USER", "LOGNAME", "SHELL", "TMPDIR", "TMP", "TEMP", "LANG", "LANGUAGE", "TZ", "TERM", "COLORTERM",
+  "SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT", "USERPROFILE", "USERNAME", "USERDOMAIN", "APPDATA", "LOCALAPPDATA", "PROGRAMDATA",
+  "PROGRAMFILES", "PROGRAMFILES(X86)", "PROGRAMW6432", "COMMONPROGRAMFILES", "COMMONPROGRAMFILES(X86)", "HOMEDRIVE", "HOMEPATH",
+  "SYSTEMDRIVE", "ALLUSERSPROFILE", "PUBLIC", "COMPUTERNAME", "OS", "NUMBER_OF_PROCESSORS", "PROCESSOR_ARCHITECTURE", "__CF_USER_TEXT_ENCODING",
+  "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "ALL_PROXY", "NODE_EXTRA_CA_CERTS", "SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE",
+  "GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_AUTHOR_DATE", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL", "GIT_COMMITTER_DATE",
+  "GIT_SSL_CAINFO", "GIT_SSL_CAPATH", "GIT_CONFIG_NOSYSTEM", "GIT_CONFIG_GLOBAL", "GIT_CEILING_DIRECTORIES", "GNUPGHOME", "GPG_TTY", "SSH_AUTH_SOCK",
+]);
+
+export function gitEnvironment(base = process.env) {
+  const out = {};
+  for (const [key, value] of Object.entries(base)) {
+    if (typeof value !== "string" || /^(?:OMNIRUSH_|OPENCODE_SERVER_|OPENCODE_PASSWORD$)/i.test(key)) continue;
+    if (GIT_ENV_KEEP.has(key.toUpperCase()) || /^(?:LC_|XDG_)/i.test(key)) out[key] = value;
+  }
+  return out;
+}
+
 /** Runs git; resolves { code, stdout, stderr } (never rejects for a git error). */
 export function runGit(args, { cwd, env, input, timeoutMs = GIT_TIMEOUT_MS } = {}) {
   return new Promise((resolve) => {
     const child = execFile("git", args, {
       cwd, timeout: timeoutMs, maxBuffer: MAX_BUFFER, windowsHide: true,
       // GIT_OPTIONAL_LOCKS=0: reading a running task's status never takes its index.lock.
-      env: { ...process.env, ...env, GIT_TERMINAL_PROMPT: "0", GIT_OPTIONAL_LOCKS: "0", LC_ALL: "C" },
+      env: { ...gitEnvironment(), ...env, GIT_TERMINAL_PROMPT: "0", GIT_OPTIONAL_LOCKS: "0", LC_ALL: "C" },
     }, (error, stdout, stderr) => {
       const code = error ? (typeof error.code === "number" ? error.code : 1) : 0;
       resolve({ code, stdout: String(stdout ?? ""), stderr: String(stderr ?? "") || (error && typeof error.code !== "number" ? String(error.message) : "") });

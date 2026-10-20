@@ -86,3 +86,6 @@ export function taskStartedData(task: TaskRecord): Record<string, unknown>;
 export function taskMergedData(task: TaskRecord, result: { mode: "apply" | "merge"; files: TaskChange[] | number }): Record<string, unknown>;
 export function isFinished(task: TaskRecord): boolean;
 export function stateLabel(state: TaskState | string): string;
+
+/** The environment git gets (hooks are the repository's code): basics and git's own non-credential settings only. */
+export function gitEnvironment(base?: Record<string, string | undefined>): Record<string, string>;

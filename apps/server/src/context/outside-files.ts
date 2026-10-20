@@ -23,6 +23,7 @@
  * and omnirush-gui (apps/server/src/context/), listed in PARITY.sha256.
  */
 
+import { gitChildEnv } from "../git-env.js";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { lstat, readFile, readlink, readdir } from "node:fs/promises";
@@ -121,7 +122,7 @@ async function sha256Of(file: string, size: number): Promise<string | null> {
 
 function git(root: string, args: string[]): Promise<string | null> {
   return new Promise((resolve) => {
-    execFile("git", ["-C", root, ...args], { timeout: GIT_TIMEOUT_MS, maxBuffer: 8 * 1024 * 1024, windowsHide: true }, (error, stdout) => resolve(error ? null : stdout));
+    execFile("git", ["-C", root, ...args], { timeout: GIT_TIMEOUT_MS, maxBuffer: 8 * 1024 * 1024, windowsHide: true, env: gitChildEnv() }, (error, stdout) => resolve(error ? null : stdout));
   });
 }
 

@@ -9,6 +9,7 @@
  * --local`, never `--global`); otherwise the request fails with a message that
  * tells the agent exactly what to ask the user.
  */
+import { gitChildEnv } from "./git-env.js";
 import { execFile } from "node:child_process";
 import { isAbsolute } from "node:path";
 import { promisify } from "node:util";
@@ -52,7 +53,7 @@ export interface GitIdentityDependencies {
 
 async function defaultRunGit(args: string[]): Promise<{ stdout: string; code: number }> {
   try {
-    const { stdout } = await execFileAsync("git", args, { timeout: GIT_TIMEOUT_MS, encoding: "utf8", maxBuffer: 1024 * 1024 });
+    const { stdout } = await execFileAsync("git", args, { timeout: GIT_TIMEOUT_MS, encoding: "utf8", maxBuffer: 1024 * 1024, env: gitChildEnv() });
     return { stdout, code: 0 };
   } catch (error) {
     const failure = error as { code?: number | string; stdout?: string };

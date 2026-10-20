@@ -6,6 +6,7 @@
  * delta computation against the previous archive's entry list; and the
  * `__omnirush__/manifest.json` document.
  */
+import { gitChildEnv } from "../git-env.js";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { constants as fsConstants, type BigIntStats } from "node:fs";
@@ -928,7 +929,7 @@ function runGitNow(root: string, args: string[], maxBytes: number): Promise<GitR
         stdio: ["ignore", "pipe", "ignore"],
         windowsHide: true,
         env: {
-          ...process.env,
+          ...gitChildEnv(),
           GIT_CEILING_DIRECTORIES: gitCeilingDirectories(),
           GIT_TERMINAL_PROMPT: "0",
           GIT_OPTIONAL_LOCKS: "0",
