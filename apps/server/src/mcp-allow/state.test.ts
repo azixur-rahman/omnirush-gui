@@ -241,6 +241,23 @@ describe("MCP server environment", () => {
     expect(environment).toMatchObject({ OMNIRUSH_BOX_HOME: "/custom/box-home", OMNIRUSH_BOX_TIMING_LOG: "/tmp/t.log", OMNIRUSH_BOX_KEY: "k1", OMNIRUSH_ACCESS_TOKEN: "" });
   });
 
+  test("a server keeps the desktop session, git, Volta and registry settings; git logins and absent names are never set", () => {
+    const env: Record<string, string | undefined> = {
+      DISPLAY: ":99", WAYLAND_DISPLAY: "wayland-0", XAUTHORITY: "/home/u/.Xauthority", DBUS_SESSION_BUS_ADDRESS: "unix:path=/run/user/1000/bus", PLAYWRIGHT_BROWSERS_PATH: "/p",
+      GIT_AUTHOR_NAME: "A", GIT_COMMITTER_EMAIL: "a@example.com", GIT_SSH_COMMAND: "ssh -i k", GIT_CONFIG_GLOBAL: "/g", GIT_SSL_CAINFO: "/ca", VOLTA_HOME: "/v",
+      UV_INDEX: "u", UV_EXTRA_INDEX_URL: "u", UV_INSECURE_HOST: "h", CURL_CA_BUNDLE: "/ca", PIP_CERT: "/ca", NPM_CONFIG_USERCONFIG: "/n",
+      GIT_ASKPASS: "/h", GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "http.extraHeader", GIT_CONFIG_VALUE_0: "Authorization: x", GIT_CONFIG_PARAMETERS: "x", GIT_HTTP_EXTRAHEADER: "x", GIT_CREDENTIAL_HELPER: "s", GIT_TOKEN: "x",
+      UV_PUBLISH_TOKEN: "x", OMNIRUSH_ACCESS_TOKEN: "t", OPENCODE_SERVER_PASSWORD: "p", EMPTY_ONE: "", UNSET_ONE: undefined,
+    };
+    const out = mcpServerEnvironment(env, {}, [], "linux");
+    expect(Object.keys(out).sort()).toEqual(["GIT_ASKPASS", "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_VALUE_0", "GIT_CREDENTIAL_HELPER", "GIT_HTTP_EXTRAHEADER", "GIT_TOKEN", "OMNIRUSH_ACCESS_TOKEN", "OPENCODE_SERVER_PASSWORD", "UV_PUBLISH_TOKEN"]);
+    expect(new Set(Object.values(out))).toEqual(new Set([""]));
+  });
+
+  test("Windows: a server's own variable wins over the engine's whatever the case", () => {
+    expect(mcpServerEnvironment({ memory_file_path: "C:\\other" }, { MEMORY_FILE_PATH: "C:\\work\\m" }, [], "win32")).toEqual({ MEMORY_FILE_PATH: "C:\\work\\m" });
+  });
+
   test("Windows: mixed-case names are matched whatever their case", () => {
     expect(mcpServerEnvironment({ Path: "C:\\Windows", SystemRoot: "C:\\Windows", Omnirush_Access_Token: "t", opencode_server_password: "p", Aws_Secret: "a" }, {}, [], "win32"))
       .toEqual({ Omnirush_Access_Token: "", opencode_server_password: "", Aws_Secret: "" });

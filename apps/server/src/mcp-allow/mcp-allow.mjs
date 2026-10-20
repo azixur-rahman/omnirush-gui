@@ -136,7 +136,7 @@ export function validRange(range) {
 // engine starts a server with its whole environment plus the entry's `environment`, so every other
 // variable it has (the app's tokens, the engine's password, the person's other keys) is set empty for
 // the server (mcpServerEnvironment). The server's own path_env / fixed_env and the key its rules name
-// (secret_env) are added on top.
+// (secret_env) are added on top. A name the engine does not have is never set, not even empty.
 export const MCP_ENV_ALLOW = Object.freeze([
   "PATH", "HOME", "USER", "LOGNAME", "SHELL", "TMPDIR", "TMP", "TEMP", "LANG", "LANGUAGE", "TZ", "TERM", "COLORTERM",
   "SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT", "USERPROFILE", "USERNAME", "USERDOMAIN", "APPDATA", "LOCALAPPDATA", "PROGRAMDATA",
@@ -148,8 +148,15 @@ export const MCP_ENV_ALLOW = Object.freeze([
   "NODE_EXTRA_CA_CERTS", "SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE",
   "NPM_CONFIG_REGISTRY", "NPM_CONFIG_CAFILE", "NPM_CONFIG_PROXY", "NPM_CONFIG_HTTPS_PROXY", "NPM_CONFIG_NOPROXY", "NPM_CONFIG_STRICT_SSL",
   "UV_INDEX_URL", "UV_DEFAULT_INDEX", "UV_NATIVE_TLS", "PIP_INDEX_URL",
+  "UV_INDEX", "UV_EXTRA_INDEX_URL", "UV_INSECURE_HOST", "CURL_CA_BUNDLE", "PIP_CERT", "NPM_CONFIG_USERCONFIG",
+  // The desktop session, so a server can open a window (a headed browser on Linux).
+  "DISPLAY", "WAYLAND_DISPLAY", "XAUTHORITY", "DBUS_SESSION_BUS_ADDRESS", "PLAYWRIGHT_BROWSERS_PATH",
 ]);
-const MCP_ENV_ALLOW_PREFIX = /^(?:LC_|XDG_)/i;
+// Locale, desktop folders, Volta and git's own settings (identity, config file, ssh, certificates).
+const MCP_ENV_ALLOW_PREFIX = /^(?:LC_|XDG_|VOLTA_|GIT_)/i;
+// Git settings that can carry a login or start a helper that hands one out (http.extraHeader through
+// GIT_CONFIG_*, an askpass or credential helper): empty for a server like every other variable.
+const MCP_ENV_GIT_CREDENTIAL = /^GIT_(?:ASKPASS$|CREDENTIAL|HTTP_EXTRAHEADER|CONFIG_PARAMETERS$|CONFIG_COUNT$|CONFIG_KEY_|CONFIG_VALUE_)|(?:^|_)(?:TOKEN|SECRET|PASSWORD|PASSWD|PASS|AUTH|CREDENTIALS?|ASKPASS|COOKIE|KEY)(?:_|$)/i;
 // Never reaches a server, whatever its rules say.
 const MCP_ENV_NEVER = /^(?:OMNIRUSH_|OPENCODE_SERVER_|OPENCODE_PASSWORD$)/i;
 
@@ -163,11 +170,15 @@ export function mcpServerEnvironment(engineEnv, own = {}, keep = [], platform = 
   const norm = (k) => (platform === "win32" ? k.toUpperCase() : k);
   const allowed = new Set(MCP_ENV_ALLOW.map((k) => k.toUpperCase()));
   const kept = new Set(keep.filter((k) => !MCP_ENV_NEVER.test(k)).map(norm));
+  const ownKeys = new Set(Object.keys(own).map(norm));
   const out = {};
-  for (const key of Object.keys(engineEnv ?? {})) {
-    if (Object.hasOwn(own, key)) continue;
+  for (const [key, value] of Object.entries(engineEnv ?? {})) {
+    // Only a variable the engine has (set, not empty) is emptied: an empty one would change what a
+    // program does when it is not set at all (git's identity, Volta's home).
+    if (typeof value !== "string" || value === "") continue;
+    if (ownKeys.has(norm(key))) continue;
     const upper = key.toUpperCase();
-    const basic = (allowed.has(upper) || MCP_ENV_ALLOW_PREFIX.test(key)) && !MCP_ENV_NEVER.test(key);
+    const basic = (allowed.has(upper) || (MCP_ENV_ALLOW_PREFIX.test(key) && !MCP_ENV_GIT_CREDENTIAL.test(key))) && !MCP_ENV_NEVER.test(key);
     if (basic || kept.has(norm(key))) continue;
     out[key] = "";
   }
