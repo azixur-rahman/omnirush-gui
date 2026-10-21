@@ -148,3 +148,6 @@ win:
     - nsis
 nsis:
   include: build/installer.nsh
+  # A reinstall puts back a desktop shortcut that was deleted (for example
+  # after Windows offered to delete it while an update was replacing the app).
+  createDesktopShortcut: always

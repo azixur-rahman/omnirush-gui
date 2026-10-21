@@ -1448,12 +1448,15 @@ export function registerUpdaterIpc({
    * With `relaunch` (the app restarts itself: Fix and restart, Reset app
    * data) the install opens the new version when it is done, and the caller
    * must not app.relaunch() as well: the old exe would start while the
-   * installer replaces it. Never rejects.
+   * installer replaces it. With `sessionEnding` (Windows is signing out or
+   * shutting down) nothing installs: the installer would be killed after it
+   * moved the old version away, leaving no app at all. Never rejects.
    */
-  async function prepareInstallOnQuit({ relaunch = false } = {}) {
+  async function prepareInstallOnQuit({ relaunch = false, sessionEnding = false } = {}) {
     try {
       const updater = autoUpdaterInstance;
       if (!updater || !updateDownloaded || installTriggered) return null;
+      if (sessionEnding) return null;
       const installMode = await resolveInstallMode();
       if (installMode !== "in-place" && installMode !== "appimage" && installMode !== "mac-swap") return null;
       // Quitting never asks for a password: an /Applications this user cannot
@@ -1478,13 +1481,17 @@ export function registerUpdaterIpc({
       return () => {
         installTriggered = true;
         quitInstallInProgress = true;
-        // Quit means quit: install silently without relaunching, unless the
-        // app is restarting itself; then the installer opens the new version.
-        updater.autoRunAppAfterInstall = relaunch;
+        // Elsewhere quit means quit: install silently without relaunching,
+        // unless the app is restarting itself. On Windows the installer shows
+        // its progress and opens the new version when done: a silent install
+        // left nothing on screen while the old version was already moved
+        // away, and a shortcut clicked then offered to delete itself.
+        const silent = platform !== "win32";
+        updater.autoRunAppAfterInstall = relaunch || !silent;
         setTimeout(() => quitApp(), quitInstallFallbackMs);
         try {
           allowQuit();
-          updater.quitAndInstall(true, relaunch);
+          updater.quitAndInstall(silent, relaunch || !silent);
         } catch (error) {
           console.warn("[updater] install on quit failed", error?.message ?? error);
           if (relaunch) app.relaunch();

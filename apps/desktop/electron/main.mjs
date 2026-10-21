@@ -1583,6 +1583,8 @@ function startReportScrubRoots() {
 
 /** Set by restartApp(): the quit below ends in a restart. */
 let restartAfterQuit = false;
+// Windows is signing out or shutting down: a staged update waits for the next launch.
+let windowsSessionEnding = false;
 
 /**
  * Quit and open again (Fix and restart, Reset / Restore app data). The
@@ -3153,7 +3155,10 @@ async function createMainWindow() {
   });
 
   // Windows logout or shutdown never waits on the turn guard.
-  mainWindow.on("session-end", () => turnGuard.allowQuit());
+  mainWindow.on("session-end", () => {
+    windowsSessionEnding = true;
+    turnGuard.allowQuit();
+  });
   // A turn still running: ask before the window goes (turn-guard.mjs).
   mainWindow.on("close", (event) => {
     const win = mainWindow;
@@ -3439,7 +3444,7 @@ or use: pnpm dev:worktree`);
       // Re-check the update feed while services stop, so a download staged
       // before newer releases shipped is replaced by the newest one instead
       // of installing on quit.
-      const updateInstall = prepareInstallOnQuit({ relaunch: restartAfterQuit });
+      const updateInstall = prepareInstallOnQuit({ relaunch: restartAfterQuit, sessionEnding: windowsSessionEnding });
       try {
         await Promise.all([
           disposeRuntimeBeforeQuit(),

@@ -12,6 +12,17 @@ async function readConfig(name) {
 }
 
 describe("Electron distribution configs", () => {
+  it("keeps Windows shortcuts across updates and puts back a deleted desktop shortcut on reinstall", async () => {
+    const config = await readConfig("electron-builder.base.yml");
+    assert.equal(config.nsis.include, "build/installer.nsh");
+    assert.equal(config.nsis.createDesktopShortcut, "always");
+    const script = await readFile(path.resolve(dirname, "..", "build", "installer.nsh"), "utf8");
+    const uninstall = script.slice(script.indexOf("!macro customUnInstall"), script.indexOf("!macroend"));
+    assert.match(uninstall, /\$\{ifNot\} \$\{isUpdated\}[\s\S]*Delete "\$1"[\s\S]*\$\{endIf\}/, "an update must not delete the Start menu shortcut");
+    const install = script.slice(script.indexOf("!macro customInstall"));
+    assert.match(install, /\$\{ifNot\} \$\{FileExists\} "\$newStartMenuLink"[\s\S]*CreateShortCut "\$newStartMenuLink"/);
+  });
+
   it("uses a stable Linux desktop identity and ships integration icons", async () => {
     const packageMetadata = JSON.parse(
       await readFile(path.resolve(dirname, "..", "package.json"), "utf8"),

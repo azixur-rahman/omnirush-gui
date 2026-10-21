@@ -1120,7 +1120,7 @@ describe("installing the newest published release", () => {
     }
   });
 
-  it("on quit, re-checks the feed and silently installs the newest release", async () => {
+  it("on quit, re-checks the feed and installs the newest release with the Windows installer on screen", async () => {
     const { tempDir, handlers, feed, downloaded, installs, updater, prepareInstallOnQuit } = await publishingFeedHarness({
       quitInstallFallbackMs: 0,
     });
@@ -1133,8 +1133,8 @@ describe("installing the newest published release", () => {
       assert.equal(typeof installAndQuit, "function");
       installAndQuit();
       assert.deepEqual(downloaded, ["2.2.1", "2.2.3"]);
-      assert.deepEqual(installs, [{ version: "2.2.3", isSilent: true, isForceRunAfter: false }]);
-      assert.equal(updater.autoRunAppAfterInstall, false);
+      assert.deepEqual(installs, [{ version: "2.2.3", isSilent: false, isForceRunAfter: true }]);
+      assert.equal(updater.autoRunAppAfterInstall, true, "the new version opens instead of the app vanishing");
       assert.equal(await prepareInstallOnQuit(), null, "an install already started");
     } finally {
       await rm(tempDir, { recursive: true, force: true });
@@ -1151,8 +1151,47 @@ describe("installing the newest published release", () => {
       const installAndQuit = await prepareInstallOnQuit({ relaunch: true });
       assert.equal(typeof installAndQuit, "function");
       installAndQuit();
-      assert.deepEqual(installs, [{ version: "2.2.1", isSilent: true, isForceRunAfter: true }]);
+      assert.deepEqual(installs, [{ version: "2.2.1", isSilent: false, isForceRunAfter: true }]);
       assert.equal(updater.autoRunAppAfterInstall, true);
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("on macOS a quit still installs silently without reopening the app", async () => {
+    const { tempDir, handlers, installs, updater, prepareInstallOnQuit } = await publishingFeedHarness({
+      quitInstallFallbackMs: 0,
+      platform: "darwin",
+      isDeveloperIdSigned: async () => true,
+      getAppPath: () => "/Applications/OmniRush.ai.app/Contents/Resources/app.asar",
+      execPath: "/Applications/OmniRush.ai.app/Contents/MacOS/OmniRush.ai",
+      isReadOnlyVolume: async () => false,
+      isInApplicationsFolder: () => true,
+    });
+    try {
+      assert.equal((await handlers.get("omnirush:updater:check")(null, "stable")).installMode, "in-place");
+      await handlers.get("omnirush:updater:download")();
+      const installAndQuit = await prepareInstallOnQuit();
+      assert.equal(typeof installAndQuit, "function");
+      installAndQuit();
+      assert.deepEqual(installs, [{ version: "2.2.1", isSilent: true, isForceRunAfter: false }]);
+      assert.equal(updater.autoRunAppAfterInstall, false);
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("never installs while Windows signs out or shuts down", async () => {
+    const { tempDir, handlers, installs, prepareInstallOnQuit } = await publishingFeedHarness({
+      quitInstallFallbackMs: 0,
+    });
+    try {
+      await handlers.get("omnirush:updater:check")(null, "stable");
+      await handlers.get("omnirush:updater:download")();
+      assert.equal(await prepareInstallOnQuit({ sessionEnding: true }), null);
+      assert.deepEqual(installs, []);
+      const installAndQuit = await prepareInstallOnQuit();
+      assert.equal(typeof installAndQuit, "function", "the staged update still installs on the next quit");
     } finally {
       await rm(tempDir, { recursive: true, force: true });
     }
