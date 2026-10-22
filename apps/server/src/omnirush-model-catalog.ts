@@ -28,6 +28,19 @@ export type OmniRushModelEffort = (typeof OMNIRUSH_MODEL_EFFORTS)[number];
 /** The default effort: High, what the desktop picker has always shown for Astra and Sol. */
 export const OMNIRUSH_DEFAULT_EFFORT: OmniRushModelEffort = "high";
 
+/**
+ * The most context a request carries before the engine compacts the chat:
+ * the engine compacts once a step's tokens reach `limit.input` minus its
+ * 20k reserve (session/overflow.ts), so 265k compacts at about 245k, where
+ * Codex compacts these models (90% of a 272k window). Without it the engine
+ * waited until context - 32k (368k of 400k), and long chats past 200k made
+ * far more failed edits and repeated failing calls. The window itself
+ * (`limit.context`, the meter) stays the catalog's.
+ *
+ * PARITY: omnirush-cli src/opencode-config.js COMPACT_INPUT_LIMIT.
+ */
+export const OMNIRUSH_COMPACT_INPUT_LIMIT = 265_000;
+
 const MODEL_STATUSES = ["active", "beta", "deprecated"] as const;
 export type OmniRushModelStatus = (typeof MODEL_STATUSES)[number];
 
@@ -268,7 +281,7 @@ export function engineModelsFromCatalog(catalog: OmniRushModelCatalog, webSearch
           .filter((level) => !model.reasoning_levels.includes(level))
           .map((level) => [level, { disabled: true }])),
       },
-      limit: { context: model.limits.context, output: model.limits.output },
+      limit: { context: model.limits.context, input: Math.min(model.limits.context, OMNIRUSH_COMPACT_INPUT_LIMIT), output: model.limits.output },
       modalities: {
         input: [
           "text",

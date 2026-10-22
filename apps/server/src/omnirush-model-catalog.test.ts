@@ -307,7 +307,7 @@ describe("omnirush engine models from the catalog", () => {
     expect(models["meta-muse-spark"]).toMatchObject({
       name: "Meta Muse Spark",
       family: "Meta Muse",
-      limit: { context: 158_000, output: 32_000 },
+      limit: { context: 158_000, input: 158_000, output: 32_000 },
       modalities: { input: ["text", "image", "pdf"], output: ["text"] },
     });
     expect(models["meta-muse-spark"]!.status).toBeUndefined();
