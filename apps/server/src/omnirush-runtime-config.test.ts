@@ -785,7 +785,7 @@ describe("omnirush runtime config from the model catalog", () => {
       temperature: true,
       variants: museVariants,
       options: { reasoningEffort: "high" },
-      limit: { context: 158_000, input: 158_000, output: 32_000 },
+      limit: { context: 158_000, input: 146_000, output: 32_000 },
       modalities: { input: ["text", "image", "pdf"], output: ["text"] },
     });
     expect(models["muse-spark-1.3"]).toEqual({
