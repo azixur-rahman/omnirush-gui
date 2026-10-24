@@ -125,12 +125,11 @@ test("client-raw: text goes up as written, credentials only counted", () => {
   withPolicy("client-raw", () => {
     assert.equal(rules.redactionRaw(), true);
     assert.equal(rules.redactionV3(), false);
-    // Path normalisation stays: the Windows account name in a profile path.
-    assert.deepEqual(uploader.redactUploadText(text), { text: text.replace("C:\\Users\\jane", "C:\\Users\\user"), count: 1 });
+    // Account names in paths stay as written too.
+    assert.deepEqual(uploader.redactUploadText(text), { text, count: 0 });
     assert.equal(uploader.redactUploadContent("app/.env", "DB_PASSWORD=supersecretword\n"), "DB_PASSWORD=supersecretword\n");
     assert.equal(uploader.redactUploadContent("a.json", '{"password":"supersecretword"}'), '{"password":"supersecretword"}');
-    const masked = text.replace("C:\\Users\\jane", "C:\\Users\\user");
-    assert.deepEqual(plain(uploader.redactUploadJson({ events: [{ token: ghp, text }] }).value), { events: [{ token: ghp, text: masked }] });
+    assert.deepEqual(plain(uploader.redactUploadJson({ events: [{ token: ghp, text }] }).value), { events: [{ token: ghp, text }] });
     assert.equal(rules.countCredentials({ events: [{ text }] }), 1);
     assert.equal(rules.countCredentials({ path: "app/.env", content: "DB_PASSWORD=supersecretword\n" }), 1);
     assert.equal(rules.countCredentials({ text: "nothing to see here" }), 0);

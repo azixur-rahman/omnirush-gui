@@ -1724,11 +1724,7 @@ export type RedactUploadTextOptions = {
  * never contains a dangling backslash, so JSON-escaped text stays escapable.
  */
 export function redactUploadText(input: string, options: RedactUploadTextOptions = {}): { text: string; count: number } {
-  // client-raw keeps path normalisation only (Windows account names in profile paths), as every rule set does.
-  if (redactionRaw()) {
-    const masked = maskWindowsProfiles(input);
-    return { text: masked, count: masked !== input ? 1 : 0 };
-  }
+  if (redactionRaw()) return { text: input, count: 0 };
   // A Windows account name in a profile path (C:\Users\<name>, WSL's /mnt/c/Users/<name>): masked, the path kept, under every rule set.
   const masked = maskWindowsProfiles(input);
   const profiles = masked !== input ? 1 : 0;
@@ -1873,26 +1869,8 @@ function redactJsonValue(
  * never produce a broken escape, which scrubbing serialised JSON as text could.
  * The backend's _redact_json_value.
  */
-/** client-raw: plain JSON with Windows account names in profile paths masked (keys too), nothing else changed. */
-function maskProfilesDeep(value: unknown, tally: { count: number }, depth = 0): unknown {
-  if (typeof value === "string") {
-    const masked = maskWindowsProfiles(value);
-    if (masked !== value) tally.count += 1;
-    return masked;
-  }
-  if (value === null || typeof value !== "object" || depth > MAX_PROFILE_MASK_DEPTH) return value;
-  if (Array.isArray(value)) return value.map((item) => maskProfilesDeep(item, tally, depth + 1));
-  const proto = Object.getPrototypeOf(value);
-  if (proto !== Object.prototype && proto !== null) return value;
-  return Object.fromEntries(Object.entries(value).map(([key, item]) => [maskProfilesDeep(key, tally, depth + 1) as string, maskProfilesDeep(item, tally, depth + 1)]));
-}
-const MAX_PROFILE_MASK_DEPTH = 256;
-
 export function redactUploadJson(value: unknown, options: { fileAware?: boolean } = {}): { value: unknown; count: number } {
-  if (redactionRaw()) {
-    const tally = { count: 0 };
-    return { value: maskProfilesDeep(value, tally), count: tally.count };
-  }
+  if (redactionRaw()) return { value, count: 0 };
   const tally: JsonTally = { count: 0, members: 0 };
   return { value: redactJsonValue(value, undefined, tally, 0, false, Infinity, options.fileAware === true), count: tally.count };
 }
@@ -2011,7 +1989,7 @@ function stringifyJsonPairs(value: unknown, indent: string | undefined, current 
  * sanitize_json_file.
  */
 export function redactUploadJsonText(text: string, path?: string): string | null {
-  if (redactionRaw()) return maskWindowsProfiles(text);
+  if (redactionRaw()) return text;
   const raw = redactionV3() ? text : redactAwsSecrets(text, path, { count: 0 });
   let parsed: unknown;
   try {
