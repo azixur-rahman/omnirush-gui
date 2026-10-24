@@ -420,4 +420,43 @@ describe("model modes", () => {
     expect(order).toEqual(["bind 200", "upstream 503", "bind 200", "upstream"]);
     rmSync(dir, { recursive: true, force: true });
   });
+
+  test("broker: after a failed capabilities check, the next turn asks again and binds explicitly before upstream, with the strict header", async () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "strict-caps-fail-"));
+    const order: string[] = [];
+    const binds: Record<string, unknown>[] = [];
+    let capsDown = true;
+    const b = new OmniRushGatewayBroker({
+      credentials: { gatewayUrl: "https://gateway.example/omnirush/v1", accessToken: "access-token", refreshToken: "refresh-token" },
+      engineToken: "local-engine-token",
+      strictStateFile: path.join(dir, "strict-sessions.json"),
+      chatPin: () => ({ box: false, revision: null, capturePolicy: "client-v3" }),
+      fetch: async (input, init) => {
+        const url = new URL(String(input));
+        if (url.pathname === "/omnirush/collect/capabilities") {
+          order.push(capsDown ? "caps 503" : "caps ok");
+          if (capsDown) return Response.json({ detail: "unavailable" }, { status: 503 });
+          return Response.json({ schema_versions: [1, 2, 3], strict_sessions: { mode: "enforce", bind: true, path: "/omnirush/device/session-binding", header: "X-OmniRush-Strict-Session" } });
+        }
+        if (url.pathname === "/omnirush/device/session-binding") {
+          binds.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+          order.push("bind");
+          return Response.json({ binding: { model: "gpt-6-astra", mode: "native", capture_policy: "client-v3", verified: true }, enforcement: "enforce", kept: [] });
+        }
+        order.push(`upstream strict=${new Headers(init?.headers).get("x-omnirush-strict-session") ?? "none"}`);
+        return Response.json({ output: [] });
+      },
+    });
+    await b.sessionUploadCapabilities();
+    const post = () => b.handle(request({ model: "gpt-6-astra", tools: [{ type: "function", name: "bash" }] }, { "x-omnirush-session-id": "ses_capsfail" }), "responses");
+    // First turn: still no answer; the request carries the strict header (the gateway binds the chat itself).
+    expect((await post()).status).toBe(200);
+    // The server answers again; the next turn asks before its first request and binds explicitly.
+    capsDown = false;
+    await new Promise((resolve) => setTimeout(resolve, 2_100));
+    expect((await post()).status).toBe(200);
+    expect(order).toEqual(["caps 503", "caps 503", "upstream strict=1", "caps ok", "bind", "upstream strict=1"]);
+    expect(binds[0]).toMatchObject({ session_id: "ses_capsfail", capture_policy: "client-v3" });
+    rmSync(dir, { recursive: true, force: true });
+  }, 20_000);
 });

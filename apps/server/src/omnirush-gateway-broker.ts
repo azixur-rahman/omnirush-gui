@@ -16,13 +16,16 @@ import { builtinOmniRushModelCatalog, omnirushModelWantsReasoningSummary } from 
 import { RejectedAttachments, isRejectedAttachmentError, type Attachment } from "./rejected-attachments.js";
 import { gatewayUrlAllowed, RELEASE_GATEWAY_ERROR } from "./release-guard.js";
 import { BOX_HEADER, MODEL_NOT_IN_MODE, notInModeMessage, projectMode } from "./model-modes/model-modes.mjs";
-import { MODE_NOT_BOUND, MODEL_NOT_BOUND, SESSION_BIND_UNCONFIRMED, SESSION_BINDING_CONFLICT, SESSION_MODEL_USED, VERIFICATION_REQUIRED, sessionBinder, strictSessions, type StrictSessions } from "./model-modes/strict-sessions.mjs";
+import { MODE_NOT_BOUND, MODEL_NOT_BOUND, SESSION_BIND_UNCONFIRMED, STRICT_SESSION_HEADER, SESSION_BINDING_CONFLICT, SESSION_MODEL_USED, VERIFICATION_REQUIRED, sessionBinder, strictSessions, type StrictSessions } from "./model-modes/strict-sessions.mjs";
 
 /** A main chat's request on another model than the one it started on (one model per chat). */
 const SESSION_MODEL_FIXED = "session_model_fixed";
 /** The gateway's retryable strict-session refusal (503, Retry-After), and how often the same request is sent again. */
 const STRICT_UNAVAILABLE = "strict_session_unavailable";
 const STRICT_RETRIES = 3;
+/** An unknown strict switch: capabilities asked again at most this often, each wait at most this long. */
+const STRICT_ASK_MS = 2_000;
+const STRICT_ASK_WAIT_MS = 5_000;
 /** A chat's title request (opencode-plugins/omnirush-title-recovery.ts marks it) and the chat's own model. */
 const TITLE_HEADER = "x-omnirush-title";
 const CHAT_MODEL_HEADER = "x-omnirush-chat-model";
@@ -1294,6 +1297,10 @@ export class OmniRushGatewayBroker {
   private strictBind: StrictSessions | null = null;
   /** The server whose capabilities answer `strictBind` is (null: none in this process yet). */
   private strictOrigin: string | null = null;
+  /** When capabilities were last asked again for an unknown switch. */
+  private strictAskedAt = 0;
+  /** A capabilities check failed and none answered since. */
+  private capabilitiesFailed = false;
   private readonly strictStateFile?: string;
   private readonly onCapturePolicy?: BrokerOptions["onCapturePolicy"];
   private readonly onBinding?: BrokerOptions["onBinding"];
@@ -1663,11 +1670,13 @@ export class OmniRushGatewayBroker {
     // The key after the probe: a 401 inside it may have rotated the pair.
     const settledKey = this.state ? this.capabilityKey(this.state) : null;
     if (capabilities === null) {
+      this.capabilitiesFailed = true;
       if (settledKey) this.capabilityFailure = { gatewayUrl, accountKey: settledKey, until: Date.now() + TRACE_CAPABILITY_RETRY_MS };
       return failed();
     }
     if (settledKey && this.state?.gatewayUrl === gatewayUrl) {
       this.capabilityFailure = null;
+      this.capabilitiesFailed = false;
       this.capabilityCache = { gatewayUrl, accountKey: settledKey, capabilities, expiresAt: Date.now() + TRACE_CAPABILITY_TTL_MS };
       this.rememberStrict(gatewayUrl, capabilities);
     }
@@ -2014,7 +2023,10 @@ export class OmniRushGatewayBroker {
     const fixed = this.fixedModelRefusal(request, path, body);
     if (fixed) return fixed;
     // The last capabilities answer's switch (this server's, kept on disk until it answers): a model request never waits for one.
+    // The switch not known yet (capabilities failed, nothing kept): asked again, bounded, before this request.
+    if (this.strictUnknown()) await this.askStrictAgain();
     const strict = this.currentStrict();
+    const strictHeader = strict?.header ?? (this.strictUnknown() ? STRICT_SESSION_HEADER : null);
     const unbound = strict ? await this.strictBindRefusal(strict, request, path, body) : null;
     if (unbound) return unbound;
     const forwardedBody = path === "responses" && body !== undefined
@@ -2028,7 +2040,7 @@ export class OmniRushGatewayBroker {
       }
       if (!this.state) break;
       try {
-        const response = await this.forward(request, path, forwardedBody, attempt === 0 ? accessToken : this.state.accessToken, requestId, strict?.header ?? null);
+        const response = await this.forward(request, path, forwardedBody, attempt === 0 ? accessToken : this.state.accessToken, requestId, strictHeader);
         return await this.strictRetry(response, async () => {
           // The gateway could not confirm the chat: it is bound again before the same request goes up.
           const session = request.headers.get("x-omnirush-session-id");
@@ -2037,7 +2049,7 @@ export class OmniRushGatewayBroker {
             const refused = await this.strictBindRefusal(strict, request, path, body);
             if (refused) return refused;
           }
-          return this.forward(request, path, forwardedBody, this.state?.accessToken, requestId, strict?.header ?? null);
+          return this.forward(request, path, forwardedBody, this.state?.accessToken, requestId, strictHeader);
         }, request.signal);
       } catch (error) {
         if (request.signal.aborted) throw error;
@@ -2205,6 +2217,27 @@ export class OmniRushGatewayBroker {
       response = await again();
     }
     return response;
+  }
+
+  /** Whether this server's strict-session switch is unknown: its capabilities check failed, no answer since and none kept on disk. */
+  private strictUnknown(): boolean {
+    if (!this.state || !this.capabilitiesFailed) return false;
+    const origin = originOf(this.state.gatewayUrl);
+    return this.strictOrigin !== origin && !Object.hasOwn(this.savedStrict(), origin);
+  }
+
+  /**
+   * Capabilities asked again past their failure cooldown (at most once per STRICT_ASK_MS, waited for at
+   * most STRICT_ASK_WAIT_MS): a turn after a failed check binds explicitly as soon as the server answers.
+   */
+  private async askStrictAgain(): Promise<void> {
+    if (Date.now() - this.strictAskedAt < STRICT_ASK_MS) return;
+    this.strictAskedAt = Date.now();
+    this.capabilityFailure = null;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const late = new Promise<void>((resolve) => { timer = setTimeout(resolve, STRICT_ASK_WAIT_MS); });
+    await Promise.race([this.sessionUploadCapabilities().then(() => undefined, () => undefined), late]);
+    clearTimeout(timer);
   }
 
   /** The strict sessions in force for the current server: its last answer in this process, else the one kept on disk. */
