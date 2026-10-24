@@ -74,6 +74,11 @@ describe("a server-only recovery takes the server's capture switch, never the de
     const { recovered } = await serverOnlyRecovery("client-raw");
     expect(recovered.length).toBeGreaterThan(0);
     expect(new Set(recovered.map(policyOf))).toEqual(new Set(["client-v3"]));
+    // The envelope itself is client-v3, its declared scope too: credentials only, never the raw (empty) set.
+    for (const envelope of recovered) {
+      const privacy = (envelope.privacy ?? envelope.privacy_policy) as { redaction?: unknown } | undefined;
+      expect(privacy?.redaction).toEqual(["provider_secrets", "secret_assignments", "private_keys"]);
+    }
   }, 20_000);
 
   test("no answer: nothing goes up (the journal waits for a later start)", async () => {

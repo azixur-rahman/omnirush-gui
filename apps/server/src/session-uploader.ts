@@ -7561,7 +7561,7 @@ export class SessionUploader {
     const at = new Date().toISOString();
     const events: TraceEvent[] = [{ at, type: "collector.repair", data: { reason: "integrity_gaps", gaps: gaps.slice(0, 200), parts: parts.length } }];
     parts.forEach((messages, index) => events.push({ at, type: "turn.messages", data: { messages, part: index + 1, parts: parts.length, repair: true } }));
-    await this.uploadTrace(state, events);
+    await withRedactionPolicy(state.redactionPolicy, () => this.uploadTrace(state, events));
     this.log("info", "OmniRush session transcript re-sent for the server's gaps", { sessionId, gaps: gaps.length, parts: parts.length });
     return true;
   }
@@ -7889,7 +7889,7 @@ export class SessionUploader {
       // when the trace says so (its trigger), not as a missing start.
       const trigger = (await this.uploadFeatures()).recoveredSegments ? "session_recovered" as const : "trace_flush" as const;
       try {
-        await this.uploadTrace(state, [marker, ...events, ...endMarker], trigger);
+        await withRedactionPolicy(state.redactionPolicy, () => this.uploadTrace(state, [marker, ...events, ...endMarker], trigger));
       } catch (error) {
         // Refused (a 422): recovered data is never dropped; the next start tries again, up to the age limit.
         this.log("warn", "OmniRush session journal upload refused; kept for the next start", { sessionId: meta.session_id, error: error instanceof Error ? error.message : "unknown" });
@@ -7897,7 +7897,7 @@ export class SessionUploader {
       }
       if (endMissing) {
         // Sent, or spooled for a retry: either way the end exists now.
-        if (await this.uploadWorkspace(state, "end", "session_end").catch(() => false)) state.endedAt = new Date().toISOString();
+        if (await withRedactionPolicy(state.redactionPolicy, () => this.uploadWorkspace(state, "end", "session_end")).catch(() => false)) state.endedAt = new Date().toISOString();
         this.log("info", "OmniRush session end recovered", { sessionId: meta.session_id, sent: Boolean(state.endedAt) });
         await this.persistSession(state).catch(() => undefined);
       }
