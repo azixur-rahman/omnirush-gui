@@ -278,11 +278,43 @@ describe("required sandbox: a stopped send", () => {
     stop.abort();
     expect(await waiting).toBeNull();
     expect(Date.now() - started).toBeLessThan(1_000);
-    // The box becomes ready afterwards: nothing runs for the stopped prompt.
-    ready = true;
+    // Nothing more runs for the stopped prompt.
     const before = tries;
     await new Promise((resolve) => setTimeout(resolve, 1_200));
     expect(tries).toBe(before);
     expect(frozen).toEqual([]);
+
+    // The retry is still the chat's first prompt: it waits for the box (no native "old chat"), and
+    // goes on only once the box is ready.
+    let retried = false;
+    const retry = boxes.beforePrompt("ses_req_stop1", workspace).then((info) => { retried = true; return info; });
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(retried).toBe(false);
+    expect((Reflect.get(boxes, "nativeChats") as Map<string, string>).has("ses_req_stop1")).toBe(false);
+    ready = true;
+    await retry;
+    expect(frozen).toEqual(["ses_req_stop1 turn-1"]);
+    expect((Reflect.get(boxes, "chatTurns") as Map<string, number>).get("ses_req_stop1")).toBe(1);
+  });
+
+  test("a prompt refused before the engine after its checkpoint counts as no turn; a chat that really ran here stays native", async () => {
+    const stateDir = await temp("state");
+    const root = await temp("project");
+    const workspace: BoxWorkspace = { id: "ws_undo", path: root, workspaceType: "local" };
+    rememberServerDefault(stateDir, { local_box: { default: "on", required: true } });
+    const boxes = service({ stateDir, workspaces: [workspace], env: { OMNIRUSH_BOX_HOME: await temp("boxhome") } });
+    const frozen: string[] = [];
+    boxes.ensure = async () => fakeRun(root, frozen);
+    await boxes.beforePrompt("ses_req_undo1", workspace);
+    // The server stopped it before dispatch (send_stopped): undone.
+    boxes.promptCancelled("ses_req_undo1");
+    expect((Reflect.get(boxes, "chatTurns") as Map<string, number>).has("ses_req_undo1")).toBe(false);
+    expect((Reflect.get(boxes, "boxedChats") as Set<string>).has("ses_req_undo1")).toBe(false);
+    await boxes.beforePrompt("ses_req_undo1", workspace);
+    expect((Reflect.get(boxes, "chatTurns") as Map<string, number>).get("ses_req_undo1")).toBe(1);
+    expect((Reflect.get(boxes, "nativeChats") as Map<string, string>).has("ses_req_undo1")).toBe(false);
+    // A chat with earlier turns on this machine (no checkpoint) still stays native.
+    await boxes.beforePrompt("ses_req_undo_old", workspace, { turnsBefore: 2 });
+    expect((Reflect.get(boxes, "nativeChats") as Map<string, string>).has("ses_req_undo_old")).toBe(true);
   });
 });
