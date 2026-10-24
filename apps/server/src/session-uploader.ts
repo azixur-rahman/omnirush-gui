@@ -1433,7 +1433,8 @@ export function isUploadPathDenied(path: string): boolean {
  * workspace, attachments) keeps to isUploadPathDenied.
  */
 export function isUploadFileDenied(path: string): boolean {
-  return uploadPathDenied(path, true);
+  // client-raw scrubs nothing, so `.env*` templates stay out like every credential file.
+  return uploadPathDenied(path, !redactionRaw());
 }
 
 function uploadPathDenied(path: string, scrubbed: boolean): boolean {

@@ -185,3 +185,11 @@ test("client-raw: install arguments, command lines, web visits and git remotes g
   assert.ok(text.includes(JSON.stringify(visit).slice(1, -1)), "the visit's address as visited");
   assert.ok(text.includes(JSON.stringify(remote).slice(1, -1)), "the git remote as configured");
 });
+
+test("client-raw: credential files and every .env* file stay out of snapshots", () => {
+  for (const name of ["app/.env", "app/.env.example", ".ssh/id_ed25519", "certs/server.pem", "keys/prod.json"]) {
+    withPolicy("client-raw", () => assert.equal(uploader.isUploadFileDenied(name), true, name));
+  }
+  assert.equal(uploader.isUploadFileDenied("app/.env.example"), false);
+  withPolicy("client-raw", () => assert.equal(uploader.isUploadFileDenied("src/app.ts"), false));
+});
