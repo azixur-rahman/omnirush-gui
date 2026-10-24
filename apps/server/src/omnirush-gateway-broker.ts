@@ -1292,6 +1292,8 @@ export class OmniRushGatewayBroker {
   private readonly chatPin?: BrokerOptions["chatPin"];
   /** The strict sessions ({ path, header }) of the last capabilities answer (null: off, or an older server). */
   private strictBind: StrictSessions | null = null;
+  /** The server whose capabilities answer `strictBind` is (null: none in this process yet). */
+  private strictOrigin: string | null = null;
   private readonly strictStateFile?: string;
   private readonly onCapturePolicy?: BrokerOptions["onCapturePolicy"];
   private readonly onBinding?: BrokerOptions["onBinding"];
@@ -1362,7 +1364,7 @@ export class OmniRushGatewayBroker {
     this.onCapturePolicy = options.onCapturePolicy;
     this.onBinding = options.onBinding;
     this.strictStateFile = options.strictStateFile;
-    if (this.state) this.strictBind = this.savedStrict()[originOf(this.state.gatewayUrl)] ?? null;
+
     this.reasoningSummaryFor = options.reasoningSummaryFor ?? defaultReasoningSummaryFor;
   }
 
@@ -2011,8 +2013,8 @@ export class OmniRushGatewayBroker {
     // One model per chat: a main chat's agent request on another model than its first is refused here.
     const fixed = this.fixedModelRefusal(request, path, body);
     if (fixed) return fixed;
-    // The last capabilities answer's switch: a model request never waits for one.
-    const strict = this.state ? this.strictBind : null;
+    // The last capabilities answer's switch (this server's, kept on disk until it answers): a model request never waits for one.
+    const strict = this.currentStrict();
     const unbound = strict ? await this.strictBindRefusal(strict, request, path, body) : null;
     if (unbound) return unbound;
     const forwardedBody = path === "responses" && body !== undefined
@@ -2027,7 +2029,16 @@ export class OmniRushGatewayBroker {
       if (!this.state) break;
       try {
         const response = await this.forward(request, path, forwardedBody, attempt === 0 ? accessToken : this.state.accessToken, requestId, strict?.header ?? null);
-        return await this.strictRetry(response, () => this.forward(request, path, forwardedBody, this.state?.accessToken, requestId, strict?.header ?? null), request.signal);
+        return await this.strictRetry(response, async () => {
+          // The gateway could not confirm the chat: it is bound again before the same request goes up.
+          const session = request.headers.get("x-omnirush-session-id");
+          if (strict && session) {
+            this.bindSession.forget(session);
+            const refused = await this.strictBindRefusal(strict, request, path, body);
+            if (refused) return refused;
+          }
+          return this.forward(request, path, forwardedBody, this.state?.accessToken, requestId, strict?.header ?? null);
+        }, request.signal);
       } catch (error) {
         if (request.signal.aborted) throw error;
         failure = fetchFailure(error);
@@ -2196,6 +2207,14 @@ export class OmniRushGatewayBroker {
     return response;
   }
 
+  /** The strict sessions in force for the current server: its last answer in this process, else the one kept on disk. */
+  private currentStrict(): StrictSessions | null {
+    if (!this.state) return null;
+    const origin = originOf(this.state.gatewayUrl);
+    if (this.strictOrigin === origin) return this.strictBind;
+    return this.savedStrict()[origin] ?? null;
+  }
+
   private savedStrict(): Record<string, StrictSessions | null> {
     if (!this.strictStateFile) return {};
     try {
@@ -2210,6 +2229,7 @@ export class OmniRushGatewayBroker {
   /** A capabilities answer's strict sessions: in force now, and kept on disk for this server. */
   private rememberStrict(gatewayUrl: string, capabilities: TraceCapabilities): void {
     this.strictBind = strictSessions(capabilities);
+    this.strictOrigin = originOf(gatewayUrl);
     if (!this.strictStateFile) return;
     try {
       mkdirSync(dirname(this.strictStateFile), { recursive: true, mode: 0o700 });

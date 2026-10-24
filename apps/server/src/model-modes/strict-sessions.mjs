@@ -86,6 +86,7 @@ function detailOf(answer) {
  * the root chat's own pin, for binding it first). A session bound (or one the
  * server will not bind: a Claude chat, a refused model) is not asked again in
  * this process; the cache is keyed on the client's own id, never the echo.
+ * bind.forget(id) drops a session from that cache, so its next request binds again.
  */
 export function sessionBinder(post, { timeoutMs = BIND_TIMEOUT_MS } = {}) {
   const settled = new Set();
@@ -104,7 +105,7 @@ export function sessionBinder(post, { timeoutMs = BIND_TIMEOUT_MS } = {}) {
     ...(pin.revision ? { revision: pin.revision } : {}),
     ...(capturePolicy ? { capture_policy: capturePolicy } : {}),
   });
-  return async function bind(chat) {
+  async function bind(chat) {
     if (!chat || !chat.path || !chat.sessionId || !chat.model || settled.has(chat.sessionId)) return { ok: true };
     const unconfirmed = { refused: { code: SESSION_BIND_UNCONFIRMED, message: UNCONFIRMED_MESSAGE, retry: true } };
     if (chat.enforce && !chat.capturePolicy) return unconfirmed;
@@ -138,5 +139,8 @@ export function sessionBinder(post, { timeoutMs = BIND_TIMEOUT_MS } = {}) {
     }
     // No answer (network, 5xx, timeout, another status): enforce holds the request, observe lets it go.
     return chat.enforce ? unconfirmed : { ok: true };
-  };
+  }
+  // A session bound before is asked again (the gateway said it could not confirm the chat).
+  bind.forget = (id) => { settled.delete(id); };
+  return bind;
 }

@@ -377,4 +377,47 @@ describe("model modes", () => {
     expect(still.headers.get("x-should-retry")).not.toBe("false");
     expect(hits).toBe(4);
   });
+
+  test("broker: under enforce a failed first bind is bound again on the retry, before anything goes upstream", async () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "strict-rebind-"));
+    const order: string[] = [];
+    let bindFails = 1;
+    const b = new OmniRushGatewayBroker({
+      credentials: { gatewayUrl: "https://gateway.example/omnirush/v1", accessToken: "access-token", refreshToken: "refresh-token" },
+      engineToken: "local-engine-token",
+      strictStateFile: path.join(dir, "strict-sessions.json"),
+      bindTimeoutMs: 100,
+      chatPin: () => ({ box: false, revision: null, capturePolicy: "legacy" }),
+      fetch: async (input) => {
+        const url = new URL(String(input));
+        if (url.pathname === "/omnirush/collect/capabilities") return Response.json({ schema_versions: [1, 2, 3], strict_sessions: { mode: "enforce", bind: true, path: "/omnirush/device/session-binding", header: "X-OmniRush-Strict-Session" } });
+        if (url.pathname === "/omnirush/device/session-binding") {
+          if (bindFails > 0) { bindFails -= 1; order.push("bind 503"); return Response.json({ detail: "unavailable" }, { status: 503 }); }
+          order.push("bind 200");
+          return Response.json({ binding: { model: "gpt-6-astra", mode: "native", capture_policy: "legacy", verified: true }, enforcement: "enforce", kept: [] });
+        }
+        if (gatewayRefuses > 0) {
+          gatewayRefuses -= 1;
+          order.push("upstream 503");
+          return Response.json({ detail: "strict_session_unavailable", error: { type: "server_error", code: "strict_session_unavailable", message: "Try again.", omnirush: { code: "strict_session_unavailable", retry: true } } }, { status: 503, headers: { "x-should-retry": "true", "retry-after": "0" } });
+        }
+        order.push("upstream");
+        return Response.json({ output: [] });
+      },
+    });
+    let gatewayRefuses = 0;
+    // The kept enforce (no capabilities answer in this process yet) holds the first request.
+    writeFileSync(path.join(dir, "strict-sessions.json"), JSON.stringify({ "https://gateway.example": { mode: "enforce", path: "/omnirush/device/session-binding", header: "x-omnirush-strict-session" } }));
+    const post = (id = "ses_rebind") => b.handle(request({ model: "gpt-6-astra", tools: [{ type: "function", name: "bash" }] }, { "x-omnirush-session-id": id }), "responses");
+    expect((await post()).status).toBe(503);
+    expect((await post()).status).toBe(200);
+    expect(order).toEqual(["bind 503", "bind 200", "upstream"]);
+    // The gateway cannot confirm a bound chat: it is bound again before the same request goes up.
+    await b.sessionUploadCapabilities();
+    order.length = 0;
+    gatewayRefuses = 1;
+    expect((await post("ses_second")).status).toBe(200);
+    expect(order).toEqual(["bind 200", "upstream 503", "bind 200", "upstream"]);
+    rmSync(dir, { recursive: true, force: true });
+  });
 });

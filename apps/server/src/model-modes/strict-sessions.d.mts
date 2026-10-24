@@ -25,4 +25,4 @@ export type BindPost = (path: string, body: Record<string, unknown>, signal: Abo
 export function strictSessions(capabilities: unknown): StrictSessions | null;
 export function bindingConflictMessage(binding: unknown, model: string): string;
 export function modelUsedMessage(modelsUsed: unknown, model: string): string;
-export function sessionBinder(post: BindPost, options?: { timeoutMs?: number }): (chat: BindChat) => Promise<BindOutcome>;
+export function sessionBinder(post: BindPost, options?: { timeoutMs?: number }): ((chat: BindChat) => Promise<BindOutcome>) & { forget(id: string): void };

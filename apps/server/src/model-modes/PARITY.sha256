@@ -2,5 +2,5 @@
 # A change to one must be ported to the other and this list updated in both.
 609bbc9cb508b4f79295e0b2f1f4707bd1facbee83835d5db7eac02fa088f43b  model-modes.mjs
 ef8a96d1e71ea3f5f3ab7a96796d042c009d90cc2896e7132b8dfc4486540699  model-modes.d.mts
-7aa8c758c3d9a148911bda110d90f4542a67be9d996718228feb788680100f67  strict-sessions.mjs
-81049cae72b0dfe53f769835acd649b50aff1737c8c3e40f1647328a09f9ef05  strict-sessions.d.mts
+41d945bb9aab9be941dd1840a61384982a37b986e7d2e7306c57d32ffc2b6e2c  strict-sessions.mjs
+7c98a499302e9d32799998f6960f0f5f3b4ff47b85fe24c5cc54bbfa084df54d  strict-sessions.d.mts
