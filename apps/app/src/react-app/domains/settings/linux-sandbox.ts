@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { captureAnalyticsEvent, type AnalyticsProperties } from "@/app/lib/analytics";
+import { setSandboxSetupHold } from "@/app/lib/opencode";
 import type { OmniRushServerClient, OmniRushWorkspaceBox, OmniRushWorkspaceBoxProgress, OmniRushWorkspaceBoxSetupAction } from "@/app/lib/omnirush-server";
 
 export type LinuxSandboxClient = Pick<OmniRushServerClient, "getWorkspaceBox" | "setWorkspaceBox" | "setWorkspaceBoxBackend" | "resetWorkspaceBox" | "retryWorkspaceBox"> & Partial<Pick<OmniRushServerClient, "setupWorkspaceBox">>;
@@ -212,6 +213,11 @@ export type LinuxSandboxProblem = { message: string; retry: (() => void) | null 
  * while it moves, and when the window comes back), the switch (shown at
  * once, before the server answers), the backend, Retry and Reset.
  */
+/** Whether the local server holds a new chat's prompt for this box (box/service.ts waitForBox): required, on, downloading or starting. */
+export function sandboxSetupHolds(box: Pick<OmniRushWorkspaceBox, "required" | "on" | "state"> | null): boolean {
+  return Boolean(box?.required && box.on && (box.state === "downloading" || box.state === "starting"));
+}
+
 export function useLinuxSandbox(client: LinuxSandboxClient | null, workspaceId: string | null, { fresh: freshOnOpen = true, sessionId = null }: { fresh?: boolean; sessionId?: string | null } = {}) {
   const [box, setBox] = useState<OmniRushWorkspaceBox | null>(null);
   const [pending, setPending] = useState<LinuxSandboxPending>(null);
@@ -253,6 +259,11 @@ export function useLinuxSandbox(client: LinuxSandboxClient | null, workspaceId: 
 
   useEffect(() => {
     if (boxFor.current === workspaceId) reportSandboxFallback(workspaceId, box);
+  }, [box, workspaceId]);
+
+  // The local server holds this project's prompts while its required box is set up: a send then waits, not "unknown".
+  useEffect(() => {
+    if (workspaceId && boxFor.current === workspaceId) setSandboxSetupHold(workspaceId, sandboxSetupHolds(box));
   }, [box, workspaceId]);
 
   // While it moves: every second for a minute, then every 3 s.
