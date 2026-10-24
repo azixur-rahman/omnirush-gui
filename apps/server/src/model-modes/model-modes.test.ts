@@ -46,7 +46,7 @@ const request = (body: Record<string, unknown>, headers: Record<string, string> 
 describe("model modes", () => {
   test("CLI/desktop parity: model-modes/PARITY.sha256 matches its files", () => {
     const rows = readFileSync(path.join(import.meta.dir, "PARITY.sha256"), "utf8").split("\n").filter((line) => line && !line.startsWith("#"));
-    expect(rows.map((row) => row.split(/\s+/)[1])).toEqual(["model-modes.mjs", "model-modes.d.mts"]);
+    expect(rows.map((row) => row.split(/\s+/)[1])).toEqual(["model-modes.mjs", "model-modes.d.mts", "strict-sessions.mjs", "strict-sessions.d.mts"]);
     for (const row of rows) {
       const [hash, name] = row.split(/\s+/);
       const actual = createHash("sha256").update(readFileSync(path.join(import.meta.dir, name ?? ""))).digest("hex");
@@ -121,5 +121,96 @@ describe("model modes", () => {
       .handle(request({ model: "kimi-k3.1-pro" }, { "x-omnirush-box": "1", "x-omnirush-session-id": "ses_sub", "x-omnirush-subagent-fallback-model": "gpt-6-astra" }), "responses");
     expect(response.status).toBe(200);
     expect(calls.map((c) => c.model)).toEqual(["kimi-k3.1-pro", "gpt-6-astra"]);
+  });
+
+  test("broker: strict sessions bind once before a chat's first agent request; conflicts and verification stop here; failures never block", async () => {
+    type Bind = Record<string, unknown>;
+    const binds: Bind[] = [];
+    const sent: { session: string | null; strict: string | null }[] = [];
+    const bound = new Map<string, { model: string; mode: string }>([["ses_other", { model: "kimi-k3.1-pro", mode: "native" }]]);
+    let strictOn = false;
+    const tools = [{ type: "function", name: "bash" }];
+    const b = new OmniRushGatewayBroker({
+      credentials: { gatewayUrl: "https://gateway.example/omnirush/v1", accessToken: "access-token", refreshToken: "refresh-token" },
+      engineToken: "local-engine-token",
+      chatPin: (id) => (id === "ses_lost" ? { box: true, revision: "lb1:0123456789ab" } : null),
+      fetch: async (input, init) => {
+        const url = new URL(String(input));
+        const headers = new Headers(init?.headers);
+        if (url.pathname === "/omnirush/collect/capabilities") return Response.json({ schema_versions: [1, 2, 3], ...(strictOn ? { strict_sessions: { mode: "enforce", bind: true, path: "/omnirush/device/session-binding", header: "X-OmniRush-Strict-Session", implicit: true } } : {}) });
+        if (url.pathname === "/omnirush/device/session-binding") {
+          const body = JSON.parse(String(init?.body)) as Bind & { session_id: string; parent_session_id?: string; model: string; mode: string };
+          binds.push(body);
+          if (body.session_id === "ses_down") throw new TypeError("fetch failed");
+          if (body.session_id === "ses_verify") return Response.json({ detail: "verification_required" }, { status: 403 });
+          if (body.session_id === "ses_claude") return Response.json({ detail: "use_claude_token" }, { status: 400 });
+          if (body.session_id === "ses_used400") return Response.json({ detail: "session_model_used", models_used: ["kimi-k3.1-pro"] }, { status: 400 });
+          if (body.session_id === "ses_used") return Response.json({ detail: "session_model_used", models_used: ["kimi-k3.1-pro"] }, { status: 409 });
+          const root = body.parent_session_id ? bound.get(body.parent_session_id) : null;
+          if (body.parent_session_id && !root) return Response.json({ detail: "session_unknown_parent" }, { status: 409 });
+          const binding = bound.get(body.session_id) ?? root ?? { model: body.model, mode: body.mode };
+          if (binding.model !== body.model || binding.mode !== body.mode) return Response.json({ detail: "session_binding_conflict", binding }, { status: 409 });
+          bound.set(body.session_id, binding);
+          return Response.json({ binding: { ...binding, session_id: body.session_id }, enforcement: "enforce", kept: [], ...(body.session_id === "ses_late" ? { bound_late: true } : {}) });
+        }
+        sent.push({ session: headers.get("x-omnirush-session-id"), strict: headers.get("x-omnirush-strict-session") });
+        if (headers.get("x-omnirush-session-id") === "ses_gwused") return Response.json({ models_used: ["gpt-6.1-sol"], detail: "session_model_used", error: { type: "invalid_request_error", code: "session_model_used", message: "This chat already ran on another model. Start a new chat to use this one.", omnirush: { code: "session_model_used", retry: false } } }, { status: 400, headers: { "x-should-retry": "false" } });
+        if (headers.get("x-omnirush-session-id") === "ses_gw") return Response.json({ detail: "mode_not_bound", error: { type: "invalid_request_error", code: "mode_not_bound", message: "This chat runs in a normal project. Start a new chat to change the project mode.", omnirush: { code: "mode_not_bound", retry: false } } }, { status: 400, headers: { "x-should-retry": "false" } });
+        return Response.json({ output: [] });
+      },
+    });
+    const post = (session: string, extra: Record<string, string> = {}, body: Record<string, unknown> = { model: "omnirush/gpt-6-astra", tools }) => b.handle(request(body, { "x-omnirush-session-id": session, ...extra }), "responses");
+    // An older server (no strict_sessions): no bind, no header.
+    await b.sessionUploadCapabilities();
+    expect((await post("ses_off")).status).toBe(200);
+    expect(binds).toEqual([]);
+    expect(sent).toEqual([{ session: "ses_off", strict: null }]);
+    strictOn = true;
+    b.resetCapabilities();
+    await b.sessionUploadCapabilities();
+    // A root binds once; every request of the chat says it is strict, titles and compactions too.
+    expect((await post("ses_root")).status).toBe(200);
+    expect((await post("ses_root")).status).toBe(200);
+    expect((await post("ses_root", {}, { model: "gpt-6-astra" })).status).toBe(200);
+    expect((await b.handle(request({ model: "gpt-6-astra" }, { "x-omnirush-session-id": "ses_root" }, "responses/compact"), "responses/compact")).status).toBe(200);
+    expect(binds).toEqual([{ session_id: "ses_root", model: "gpt-6-astra", mode: "native", capture_policy: "legacy" }]);
+    expect(sent.slice(1).map((s) => s.strict)).toEqual(["1", "1", "1", "1"]);
+    // A sub-agent names its root.
+    expect((await post("ses_child", { "x-parent-session-id": "ses_root" })).status).toBe(200);
+    expect(binds.at(-1)).toMatchObject({ session_id: "ses_child", parent_session_id: "ses_root" });
+    // A root the server does not know: bound first, then the child once more.
+    binds.length = 0;
+    expect((await post("ses_kid2", { "x-parent-session-id": "ses_lost", "x-omnirush-box": "1" })).status).toBe(200);
+    expect(binds.map((x) => [x.session_id, x.parent_session_id ?? null, x.mode, x.revision ?? null])).toEqual([["ses_kid2", "ses_lost", "box", "lb1:0123456789ab"], ["ses_lost", null, "box", "lb1:0123456789ab"], ["ses_kid2", "ses_lost", "box", "lb1:0123456789ab"]]);
+    // Conflicts and verification: refused here, never sent.
+    const before = sent.length;
+    const conflict = await post("ses_other");
+    expect(conflict.status).toBe(400);
+    expect(conflict.headers.get("x-should-retry")).toBe("false");
+    expect(((await conflict.json()) as { error: { code: string; message: string } }).error).toMatchObject({ code: "session_binding_conflict", message: "This chat runs on kimi-k3.1-pro. Start a new chat to use gpt-6-astra." });
+    const used = await post("ses_used");
+    expect(((await used.json()) as { error: { code: string; message: string } }).error).toMatchObject({ code: "session_model_used", message: "This chat already ran on kimi-k3.1-pro. Start a new chat to use gpt-6-astra." });
+    expect(((await (await post("ses_used400")).json()) as { error: { code: string } }).error.code).toBe("session_model_used");
+    const verify = await post("ses_verify");
+    expect(verify.status).toBe(403);
+    expect(((await verify.json()) as { error: { code: string } }).error.code).toBe("verification_required");
+    expect(sent.length).toBe(before);
+    // A late bind and a Claude chat are settled; a network failure never blocks and is tried again.
+    binds.length = 0;
+    for (const id of ["ses_late", "ses_late", "ses_claude", "ses_claude"]) expect((await post(id)).status).toBe(200);
+    expect(binds.map((x) => x.session_id)).toEqual(["ses_late", "ses_claude"]);
+    binds.length = 0;
+    expect((await post("ses_down")).status).toBe(200);
+    expect((await post("ses_down")).status).toBe(200);
+    expect(binds.length).toBe(2);
+    // The gateway's mode_not_bound: final, its words kept.
+    const held = await post("ses_gw");
+    expect(held.status).toBe(400);
+    expect(held.headers.get("x-should-retry")).toBe("false");
+    expect(((await held.json()) as { error: { message: string } }).error.message).toBe("This chat runs in a normal project. Start a new chat to change the project mode.");
+    const gwUsed = await post("ses_gwused");
+    expect(gwUsed.status).toBe(400);
+    expect(gwUsed.headers.get("x-should-retry")).toBe("false");
+    expect(((await gwUsed.json()) as { error: { message: string } }).error.message).toBe("This chat already ran on another model. Start a new chat to use this one.");
   });
 });

@@ -1283,6 +1283,8 @@ export async function startServer(config: ServerConfig): Promise<ServeResult> {
       const entry = (await readOmniRushModelCatalog(config)).find((candidate) => candidate.id === model);
       return !entry || modelAllowedIn(entry, projectMode(box));
     },
+    // Strict sessions: a chat's bind names the box revision it started under.
+    chatPin: (sessionId) => boxServiceFor(config).chatPin(sessionId),
     // The desktop's update gate (banner, blocked view); session uploads and
     // project archives go on whatever it says.
     ...(config.omnirushGatewayCredentials?.onUpdateSignal ? { onUpdateSignal: config.omnirushGatewayCredentials.onUpdateSignal } : {}),
