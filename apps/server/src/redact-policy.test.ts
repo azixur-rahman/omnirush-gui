@@ -116,3 +116,21 @@ test("a filled-in .env template in a file tool's output or input is scrubbed as 
     assert.match(write.state.input.content, /^PORT=3000\nAPI_TOKEN=\[REDACTED[^\n]*\n[\s\S]*API_KEY=<your-api-key>\n$/, name);
   }
 });
+
+test("client-raw: text goes up as written, credentials only counted", () => {
+  const ghp = join(vectors.cases.find((entry) => entry.name === "github token").input).slice("gh auth: ".length);
+  assert.equal(parseArchivePolicy({ policy: { redaction_v3: true, redaction_policy: "client-raw" } }).captureRaw, true);
+  assert.equal(parseArchivePolicy({ policy: { redaction_v3: true } }).captureRaw, undefined);
+  const text = `GITHUB_TOKEN=${ghp} for jane.doe@gmail.com from 8.8.4.4\n+@toolkit.register(\nC:\\Users\\jane\\app`;
+  withPolicy("client-raw", () => {
+    assert.equal(rules.redactionRaw(), true);
+    assert.equal(rules.redactionV3(), false);
+    assert.deepEqual(uploader.redactUploadText(text), { text, count: 0 });
+    assert.equal(uploader.redactUploadContent("app/.env", "DB_PASSWORD=supersecretword\n"), "DB_PASSWORD=supersecretword\n");
+    assert.equal(uploader.redactUploadContent("a.json", '{"password":"supersecretword"}'), '{"password":"supersecretword"}');
+    assert.deepEqual(plain(uploader.redactUploadJson({ events: [{ token: ghp, text }] }).value), { events: [{ token: ghp, text }] });
+    assert.equal(rules.countCredentials({ events: [{ text }] }), 1);
+    assert.equal(rules.countCredentials({ path: "app/.env", content: "DB_PASSWORD=supersecretword\n" }), 1);
+    assert.equal(rules.countCredentials({ text: "nothing to see here" }), 0);
+  });
+});
