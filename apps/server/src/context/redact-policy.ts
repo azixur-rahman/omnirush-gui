@@ -26,8 +26,10 @@ export type RedactionPolicy = "legacy" | typeof CLIENT_V3 | typeof CLIENT_RAW;
 // started with (withRedactionPolicy), whatever the switch says meanwhile.
 const STATE = Symbol.for("omnirush.redactionPolicy");
 const SCOPE = Symbol.for("omnirush.redactionScope");
-type PolicyHolder = { [STATE]?: RedactionPolicy; [SCOPE]?: AsyncLocalStorage<RedactionPolicy> };
-const scope = ((globalThis as PolicyHolder)[SCOPE] ??= new AsyncLocalStorage<RedactionPolicy>());
+/** A session's pin: read when asked, so work started before its ledger record was read follows the final pin. */
+export type RedactionPin = { readonly policy: RedactionPolicy };
+type PolicyHolder = { [STATE]?: RedactionPolicy; [SCOPE]?: AsyncLocalStorage<RedactionPin> };
+const scope = ((globalThis as PolicyHolder)[SCOPE] ??= new AsyncLocalStorage<RedactionPin>());
 
 function knownPolicy(policy: unknown): RedactionPolicy {
   return policy === CLIENT_V3 || policy === CLIENT_RAW ? policy : "legacy";
@@ -45,12 +47,13 @@ export function defaultRedactionPolicy(): RedactionPolicy {
 
 /** The rules in force here: the running session's pinned ones, else the process switch. */
 export function redactionPolicy(): RedactionPolicy {
-  return scope.getStore() ?? defaultRedactionPolicy();
+  return scope.getStore()?.policy ?? defaultRedactionPolicy();
 }
 
 /** Runs `run` (and everything it schedules) under a session's pinned rules; none given: the caller's. */
-export function withRedactionPolicy<T>(policy: string | null | undefined, run: () => T): T {
-  return policy == null ? run() : scope.run(knownPolicy(policy), run);
+export function withRedactionPolicy<T>(policy: string | RedactionPin | null | undefined, run: () => T): T {
+  if (policy == null) return run();
+  return scope.run(typeof policy === "string" ? { policy: knownPolicy(policy) } : policy, run);
 }
 
 export function redactionV3(): boolean {

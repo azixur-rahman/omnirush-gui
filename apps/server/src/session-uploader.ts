@@ -38,7 +38,7 @@ import { engine2ImportedFrom } from "./engine2/imported.js";
 import { ContextCapture, captureContextEnabled, type ContextOptions } from "./context/index.js";
 import { INSTALL_LOG_OFF, installLogGate, type InstallLogGate } from "./context/install-log.js";
 import { UPLOAD_FORMAT_FILE, UploadFormat } from "./context/upload-format.js";
-import { CLIENT_RAW, CLIENT_V3, countCredentials, defaultRedactionPolicy, isOpaqueKey, isOpaqueString, isSecretKey, isSecretValue, redactCredentials, redactionPolicy, type RedactionPolicy, redactionRaw, redactionV3, withRedactionPolicy } from "./context/redact-policy.js";
+import { CLIENT_RAW, CLIENT_V3, countCredentials, defaultRedactionPolicy, isOpaqueKey, isOpaqueString, isSecretKey, isSecretValue, redactCredentials, redactionPolicy, type RedactionPin, type RedactionPolicy, redactionRaw, redactionV3, withRedactionPolicy } from "./context/redact-policy.js";
 import { maskWindowsProfiles } from "./context/privacy.js";
 import bundledBestPractices from "./bundled-best-practices.json" with { type: "json" };
 import serverPackage from "../package.json" with { type: "json" };
@@ -1723,7 +1723,11 @@ export type RedactUploadTextOptions = {
  * never contains a dangling backslash, so JSON-escaped text stays escapable.
  */
 export function redactUploadText(input: string, options: RedactUploadTextOptions = {}): { text: string; count: number } {
-  if (redactionRaw()) return { text: input, count: 0 };
+  // client-raw keeps path normalisation only (Windows account names in profile paths), as every rule set does.
+  if (redactionRaw()) {
+    const masked = maskWindowsProfiles(input);
+    return { text: masked, count: masked !== input ? 1 : 0 };
+  }
   // A Windows account name in a profile path (C:\Users\<name>, WSL's /mnt/c/Users/<name>): masked, the path kept, under every rule set.
   const masked = maskWindowsProfiles(input);
   const profiles = masked !== input ? 1 : 0;
@@ -1868,8 +1872,26 @@ function redactJsonValue(
  * never produce a broken escape, which scrubbing serialised JSON as text could.
  * The backend's _redact_json_value.
  */
+/** client-raw: plain JSON with Windows account names in profile paths masked (keys too), nothing else changed. */
+function maskProfilesDeep(value: unknown, tally: { count: number }, depth = 0): unknown {
+  if (typeof value === "string") {
+    const masked = maskWindowsProfiles(value);
+    if (masked !== value) tally.count += 1;
+    return masked;
+  }
+  if (value === null || typeof value !== "object" || depth > MAX_PROFILE_MASK_DEPTH) return value;
+  if (Array.isArray(value)) return value.map((item) => maskProfilesDeep(item, tally, depth + 1));
+  const proto = Object.getPrototypeOf(value);
+  if (proto !== Object.prototype && proto !== null) return value;
+  return Object.fromEntries(Object.entries(value).map(([key, item]) => [maskProfilesDeep(key, tally, depth + 1) as string, maskProfilesDeep(item, tally, depth + 1)]));
+}
+const MAX_PROFILE_MASK_DEPTH = 256;
+
 export function redactUploadJson(value: unknown, options: { fileAware?: boolean } = {}): { value: unknown; count: number } {
-  if (redactionRaw()) return { value, count: 0 };
+  if (redactionRaw()) {
+    const tally = { count: 0 };
+    return { value: maskProfilesDeep(value, tally), count: tally.count };
+  }
   const tally: JsonTally = { count: 0, members: 0 };
   return { value: redactJsonValue(value, undefined, tally, 0, false, Infinity, options.fileAware === true), count: tally.count };
 }
@@ -1988,7 +2010,7 @@ function stringifyJsonPairs(value: unknown, indent: string | undefined, current 
  * sanitize_json_file.
  */
 export function redactUploadJsonText(text: string, path?: string): string | null {
-  if (redactionRaw()) return text;
+  if (redactionRaw()) return maskWindowsProfiles(text);
   const raw = redactionV3() ? text : redactAwsSecrets(text, path, { count: 0 });
   let parsed: unknown;
   try {
@@ -3072,7 +3094,7 @@ function parseGitRemotes(raw: string): GitRemote[] {
     .slice(0, MAX_GIT_REMOTES)
     .map(([name, url]) => ({
       name: clampUploadText(portablePathForUpload(name), MAX_GIT_REMOTE_NAME_CHARS),
-      url: clampUploadText(portablePathForUpload(stripRemoteUserinfo(url)), MAX_GIT_REMOTE_URL_CHARS),
+      url: clampUploadText(portablePathForUpload(redactionRaw() ? url : stripRemoteUserinfo(url)), MAX_GIT_REMOTE_URL_CHARS),
     }));
 }
 
@@ -4634,6 +4656,21 @@ const NO_UPLOAD_FEATURES: UploadFeatures = { idempotencyKey: false, integrity: f
 /** What a /collect upload carries besides its body. */
 export type UploadRequestOptions = { idempotencyKey?: string };
 
+/** Wraps `names` (methods whose first argument is a session id) to run under that session's pin. */
+function pinSessionMethods<T extends object>(target: T, names: readonly (keyof T)[], pinOf: (sessionId: string) => RedactionPin | undefined): void {
+  for (const name of names) {
+    const method = target[name] as unknown as (sessionId: string, ...rest: unknown[]) => unknown;
+    Object.defineProperty(target, name, {
+      configurable: true,
+      writable: true,
+      value: (sessionId: string, ...rest: unknown[]) => withRedactionPolicy(pinOf(sessionId), () => method.call(target, sessionId, ...rest)),
+    });
+  }
+}
+
+/** Capture context's calls for one session: its collectors scrub under the session's pin. */
+const PINNED_CONTEXT_METHODS = ["sessionStarted", "turnStarted", "toolEvent", "turnMessages", "turnEnded", "sessionEnded", "settled"] as const;
+
 /** The public calls that record or send for one session (first argument its id): run under its pinned rules. */
 const PINNED_SESSION_METHODS = ["recordProjectArchive", "recordTrace", "markComputerUse", "recordSessionModel", "recordChildSession", "recordWebVisit", "recordAttachment", "steerTurn", "recordCommand", "captureSnapshot", "finishSession", "flushTrace"] as const;
 
@@ -4791,14 +4828,7 @@ export class SessionUploader {
       : Promise.resolve();
     this.ledgerReady = this.stateMigrated.then(() => this.loadLedger());
     // A session's work runs under the rules pinned at its start, whatever the process switch says meanwhile.
-    for (const name of PINNED_SESSION_METHODS) {
-      const method = this[name] as unknown as (sessionId: string, ...rest: unknown[]) => unknown;
-      Object.defineProperty(this, name, {
-        configurable: true,
-        writable: true,
-        value: (sessionId: string, ...rest: unknown[]) => withRedactionPolicy(this.sessions.get(sessionId)?.redactionPolicy, () => method.call(this, sessionId, ...rest)),
-      });
-    }
+    pinSessionMethods(this, PINNED_SESSION_METHODS, (sessionId) => this.pinOf(sessionId));
     this.changeDebounceMs = options.changeDebounceMs ?? CHANGE_DEBOUNCE_MS;
     this.fallbackScanMs = options.fallbackScanMs ?? FALLBACK_SCAN_MS;
     this.appVersion = options.appVersion;
@@ -4930,6 +4960,7 @@ export class SessionUploader {
       ...(installLog ? { installLog: { ...installLog, gate: () => this.installLogGate(), appDirs: stateDir ? [stateDir] : [] } } : {}),
       ...overrides,
     });
+    if (capture.enabled) pinSessionMethods(capture, PINNED_CONTEXT_METHODS, (sessionId) => this.pinOf(sessionId));
     return capture.enabled ? capture : null;
   }
 
@@ -5930,12 +5961,15 @@ export class SessionUploader {
     if (!state || state.finished) return false;
     if (typeof visit.url !== "string" || !isUploadableWebUrl(visit.url)) return false;
     const url = new URL(visit.url);
-    url.username = "";
-    url.password = "";
+    // client-raw: the address as visited.
+    if (!redactionRaw()) {
+      url.username = "";
+      url.password = "";
+    }
     const title = uploadTextForTrace(visit.title ?? null, MAX_WEB_VISIT_TITLE_CHARS * 4);
     const text = uploadTextForTrace(visit.text ?? null, MAX_UPLOAD_WEB_VISIT_TEXT_BYTES);
     this.appendTrace(state, "web.visit", {
-      url: clampUploadText(redactUploadText(url.toString()).text, MAX_WEB_VISIT_URL_CHARS),
+      url: clampUploadText(redactionRaw() ? visit.url : redactUploadText(url.toString()).text, MAX_WEB_VISIT_URL_CHARS),
       title: title.text === null ? null : clampUploadText(title.text, MAX_WEB_VISIT_TITLE_CHARS),
       text: text.text,
       text_truncated: text.truncated,
@@ -6658,6 +6692,12 @@ export class SessionUploader {
         state.changeJournalBytes -= Buffer.byteLength(JSON.stringify(entry));
       }
     }
+  }
+
+  /** A session's live pin (its rules as final once prepareSession read the ledger); none for an unknown session. */
+  private pinOf(sessionId: string): RedactionPin | undefined {
+    const state = this.sessions.get(sessionId);
+    return state && { get policy() { return state.redactionPolicy; } };
   }
 
   private enqueue(state: SessionState, operation: () => Promise<void>): void {
