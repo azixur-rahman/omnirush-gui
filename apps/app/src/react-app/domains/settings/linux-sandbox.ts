@@ -213,9 +213,14 @@ export type LinuxSandboxProblem = { message: string; retry: (() => void) | null 
  * while it moves, and when the window comes back), the switch (shown at
  * once, before the server answers), the backend, Retry and Reset.
  */
-/** Whether the local server holds a new chat's prompt for this box (box/service.ts waitForBox): required, on, downloading or starting. */
-export function sandboxSetupHolds(box: Pick<OmniRushWorkspaceBox, "required" | "on" | "state"> | null): boolean {
-  return Boolean(box?.required && box.on && (box.state === "downloading" || box.state === "starting"));
+/**
+ * Whether this project's box is being set up for its chats (on, downloading
+ * or starting), whatever turned it on: the required level, the user, a model
+ * that runs only in the box. A send then may be held by the local server until
+ * the box is ready (box/service.ts waitForBox), so it waits rather than goes "unknown".
+ */
+export function sandboxSetupHolds(box: Pick<OmniRushWorkspaceBox, "on" | "state"> | null): boolean {
+  return Boolean(box?.on && (box.state === "downloading" || box.state === "starting"));
 }
 
 export function useLinuxSandbox(client: LinuxSandboxClient | null, workspaceId: string | null, { fresh: freshOnOpen = true, sessionId = null }: { fresh?: boolean; sessionId?: string | null } = {}) {
@@ -261,7 +266,7 @@ export function useLinuxSandbox(client: LinuxSandboxClient | null, workspaceId: 
     if (boxFor.current === workspaceId) reportSandboxFallback(workspaceId, box);
   }, [box, workspaceId]);
 
-  // The local server holds this project's prompts while its required box is set up: a send then waits, not "unknown".
+  // While this project's box is set up the local server may hold its prompts: a send then waits, not "unknown".
   useEffect(() => {
     if (workspaceId && boxFor.current === workspaceId) setSandboxSetupHold(workspaceId, sandboxSetupHolds(box));
   }, [box, workspaceId]);
