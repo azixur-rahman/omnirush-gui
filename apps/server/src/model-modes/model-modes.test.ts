@@ -4,7 +4,8 @@
 // sub-agent fallback for model_not_in_mode.
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { readFileSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
 
 import { OmniRushGatewayBroker } from "../omnirush-gateway-broker.js";
@@ -102,7 +103,7 @@ describe("model modes", () => {
     expect(((await response.json()) as { error: { message: string } }).error.message).toBe("This model isn't available in sandbox projects.");
   });
 
-  test("broker: one model per chat; titles (no tools), sub-agents and other chats pass", async () => {
+  test("broker: all context-bearing requests and children inherit the chat model", async () => {
     const calls: Call[] = [];
     const b = broker(calls, undefined, false);
     const tools = [{ type: "function", name: "bash" }];
@@ -110,17 +111,61 @@ describe("model modes", () => {
     const refused = await b.handle(request({ model: "gpt-6-astra", tools }, { "x-omnirush-session-id": "ses_one" }), "responses");
     expect(refused.status).toBe(400);
     expect(((await refused.json()) as { error: { code: string; message: string } }).error).toMatchObject({ code: "session_model_fixed", message: "This chat runs on kimi-k3.1-pro. Start a new chat to use gpt-6-astra." });
-    expect((await b.handle(request({ model: "gpt-6-astra" }, { "x-omnirush-session-id": "ses_one" }), "responses")).status).toBe(200);
+    expect((await b.handle(request({ model: "gpt-6-astra" }, { "x-omnirush-session-id": "ses_one" }), "responses")).status).toBe(400);
+    expect((await b.handle(request({ model: "gpt-6-astra" }, { "x-omnirush-session-id": "ses_one" }, "responses/compact"), "responses/compact")).status).toBe(400);
+    expect((await b.handle(request({}, { "x-omnirush-session-id": "ses_one" }, "responses/compact"), "responses/compact")).status).toBe(400);
+    expect((await b.handle(request({ model: "gpt-6-astra", tools }, { "x-omnirush-session-id": "ses_child", "x-parent-session-id": "ses_one" }), "responses")).status).toBe(400);
+    expect((await b.handle(request({ model: "kimi-k3.1-pro" }, { "x-omnirush-session-id": "ses_child", "x-parent-session-id": "ses_one" }), "responses")).status).toBe(200);
+    expect((await b.handle(request({ model: "gpt-6-astra", tools }, { "x-omnirush-session-id": "unknown_child", "x-parent-session-id": "unseen" }), "responses")).status).toBe(400);
+    expect((await b.handle(request({ model: "kimi-k3.1-pro" }, { "x-omnirush-session-id": "ses_one" }, "responses/compact"), "responses/compact")).status).toBe(200);
     expect((await b.handle(request({ model: "gpt-6-astra", tools }, { "x-omnirush-session-id": "ses_two" }), "responses")).status).toBe(200);
-    expect(calls.map((c) => c.model)).toEqual(["kimi-k3.1-pro", "gpt-6-astra", "gpt-6-astra"]);
+    expect(calls.map((c) => c.model)).toEqual(["kimi-k3.1-pro", "kimi-k3.1-pro", "kimi-k3.1-pro", "gpt-6-astra"]);
   });
 
-  test("broker: a sub-agent's picked model refused for the mode runs on the main model", async () => {
+  test("broker: a new process keeps saved model pins and refuses corrupt pins", async () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "model-pins-"));
+    const file = path.join(dir, "chat-models.json");
+    const calls: string[] = [];
+    const make = () => new OmniRushGatewayBroker({sessionModelsFile: file, credentials: {gatewayUrl: "https://gateway.example/omnirush/v1", accessToken: "fixture", refreshToken: "fixture"}, engineToken: "local-engine-token", fetch: async () => {calls.push("upstream"); return Response.json({output: []});}});
+    try {
+      expect((await make().handle(request({model: "gpt-6-astra"}, {"x-omnirush-session-id": "persisted"}), "responses")).status).toBe(200);
+      const resumed = make();
+      expect((await resumed.handle(request({model: "gpt-6-sol"}, {"x-omnirush-session-id": "persisted"}), "responses")).status).toBe(400);
+      expect((await resumed.handle(request({model: "gpt-6-astra"}, {"x-omnirush-session-id": "child", "x-parent-session-id": "persisted"}), "responses")).status).toBe(200);
+      expect(calls).toHaveLength(2);
+      writeFileSync(file, "not-json");
+      expect(make).toThrow();
+    } finally {rmSync(dir, {recursive: true, force: true});}
+  });
+
+  test("broker: a fallback cannot change a session that has already requested another model", async () => {
     const calls: Call[] = [];
     const response = await broker(calls, (call) => call.model === "kimi-k3.1-pro" ? Response.json(REFUSAL, { status: 400, headers: { "x-should-retry": "false" } }) : Response.json({ output: [] }), false)
       .handle(request({ model: "kimi-k3.1-pro" }, { "x-omnirush-box": "1", "x-omnirush-session-id": "ses_sub", "x-omnirush-subagent-fallback-model": "gpt-6-astra" }), "responses");
-    expect(response.status).toBe(200);
-    expect(calls.map((c) => c.model)).toEqual(["kimi-k3.1-pro", "gpt-6-astra"]);
+    expect(response.status).toBe(400);
+    expect(calls.map((c) => c.model)).toEqual(["kimi-k3.1-pro"]);
+  });
+
+  test("broker: cooldown cannot rewrite a pinned child's requested model before validation", async () => {
+    const calls: string[] = [];
+    const b = new OmniRushGatewayBroker({credentials: {gatewayUrl: "https://gateway.example/omnirush/v1", accessToken: "fixture", refreshToken: "fixture"}, engineToken: "local-engine-token", subagentModelRefused: () => true, fetch: async (_input, init) => {calls.push(JSON.parse(typeof init?.body === "string" ? init.body : new TextDecoder().decode(init?.body as ArrayBuffer)).model); return Response.json({output: []});}});
+    expect((await b.handle(request({model: "gpt-6-astra"}, {"x-omnirush-session-id": "root"}), "responses")).status).toBe(200);
+    expect((await b.handle(request({model: "gpt-6-sol"}, {"x-omnirush-session-id": "child", "x-parent-session-id": "root", "x-omnirush-subagent-fallback-model": "gpt-6-astra"}), "responses")).status).toBe(400);
+    expect(calls).toEqual(["gpt-6-astra"]);
+  });
+
+  test("broker: a chat's title goes on the chat's model, whatever small model the engine picked", async () => {
+    const calls: Call[] = [];
+    const b = broker(calls, undefined, false);
+    const tools = [{ type: "function", name: "bash" }];
+    const title = { "x-omnirush-title": "1", "x-omnirush-chat-model": "kimi-k3.1-pro" };
+    // A new chat's title first: it takes the model the chat's prompt names, and pins it.
+    expect((await b.handle(request({ model: "gpt-6-astra" }, { "x-omnirush-session-id": "ses_t", ...title }), "responses")).status).toBe(200);
+    expect((await b.handle(request({ model: "kimi-k3.1-pro", tools }, { "x-omnirush-session-id": "ses_t" }), "responses")).status).toBe(200);
+    expect((await b.handle(request({ model: "gpt-6-astra" }, { "x-omnirush-session-id": "ses_t", ...title }), "responses")).status).toBe(200);
+    // Unmarked, another model is still refused.
+    expect((await b.handle(request({ model: "gpt-6-astra" }, { "x-omnirush-session-id": "ses_t" }), "responses")).status).toBe(400);
+    expect(calls.map((c) => c.model)).toEqual(["kimi-k3.1-pro", "kimi-k3.1-pro", "kimi-k3.1-pro"]);
   });
 
   test("broker: strict sessions bind once before a chat's first agent request; conflicts and verification stop here; failures never block", async () => {
@@ -130,10 +175,14 @@ describe("model modes", () => {
     const bound = new Map<string, { model: string; mode: string }>([["ses_other", { model: "kimi-k3.1-pro", mode: "native" }]]);
     let strictOn = false;
     const tools = [{ type: "function", name: "bash" }];
+    const pins = path.join(mkdtempSync(path.join(tmpdir(), "strict-pins-")), "chat-models.json");
+    writeFileSync(pins, JSON.stringify({ ses_lost: "gpt-6-astra" }));
     const b = new OmniRushGatewayBroker({
       credentials: { gatewayUrl: "https://gateway.example/omnirush/v1", accessToken: "access-token", refreshToken: "refresh-token" },
       engineToken: "local-engine-token",
       chatPin: (id) => (id === "ses_lost" ? { box: true, revision: "lb1:0123456789ab" } : null),
+      // A chat pinned here in an earlier run that the server never bound (its child meets session_unknown_parent).
+      sessionModelsFile: pins,
       fetch: async (input, init) => {
         const url = new URL(String(input));
         const headers = new Headers(init?.headers);

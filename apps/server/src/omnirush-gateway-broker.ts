@@ -1,5 +1,6 @@
 import { randomUUID, timingSafeEqual } from "node:crypto";
-import { createReadStream } from "node:fs";
+import { createReadStream, readFileSync, writeFileSync, mkdirSync, renameSync } from "node:fs";
+import { dirname } from "node:path";
 
 import { SESSION_UPLOAD_BUDGET, SESSION_UPLOAD_ENDPOINT_PATH, sessionUploadTimeoutMs, type SessionUploadBudget } from "./session-upload-budget.js";
 import { externalFetch } from "./server-fetch.js";
@@ -20,6 +21,9 @@ import { redactionPolicy } from "./context/redact-policy.js";
 
 /** A main chat's request on another model than the one it started on (one model per chat). */
 const SESSION_MODEL_FIXED = "session_model_fixed";
+/** A chat's title request (opencode-plugins/omnirush-title-recovery.ts marks it) and the chat's own model. */
+const TITLE_HEADER = "x-omnirush-title";
+const CHAT_MODEL_HEADER = "x-omnirush-chat-model";
 /** A refused attachment is left out and the model request sent again, at most this often per request. */
 const MAX_ATTACHMENT_RETRIES = 2;
 const MAX_ATTACHMENT_ERROR_BYTES = 256 * 1024;
@@ -56,6 +60,8 @@ export type SubagentModelFallbackEvent = {
 type BrokerOptions = {
   credentials?: OmniRushGatewayCredentials;
   engineToken?: string;
+  /** Durable model pins; production supplies the runtime-local state file. */
+  sessionModelsFile?: string;
   fetch?: typeof externalFetch;
   /** Electron's file-aware transport. Standalone runtimes use the bounded Node stream fallback. */
   uploadFile?: (url: string, init: {
@@ -1265,8 +1271,9 @@ export class OmniRushGatewayBroker {
    * question) still goes out as a box request. Oldest first, bounded.
    */
   private readonly boxSessions = new Set<string>();
-  /** Each chat's model, from its first agent request (one model per chat; oldest first, bounded). */
+  /** Each chat's model, from its first context-bearing request; pins are not evicted. */
   private readonly sessionModels = new Map<string, string>();
+  private readonly sessionModelsFile?: string;
   private readonly onUpdateSignal?: (signal: GatewayUpdateSignal) => void;
   private readonly chatPin?: BrokerOptions["chatPin"];
   /** The strict sessions ({ path, header }) of the last capabilities answer (null: off, or an older server). */
@@ -1303,6 +1310,16 @@ export class OmniRushGatewayBroker {
         }
       : null;
     this.engineToken = options.engineToken?.trim() ?? "";
+    this.sessionModelsFile = options.sessionModelsFile;
+    if (this.sessionModelsFile) {
+      try {
+        const saved: unknown = JSON.parse(readFileSync(this.sessionModelsFile, "utf8"));
+        if (!isRecord(saved) || Object.values(saved).some(model => typeof model !== "string" || !model)) throw new Error("Invalid saved session model pins");
+        for (const [session, model] of Object.entries(saved)) if (typeof model === "string") this.sessionModels.set(session, model);
+      } catch (error) {
+        if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error;
+      }
+    }
     this.invalidate = options.credentials?.invalidate;
     this.refreshOwner = options.credentials?.refresh;
     const fetcher = options.fetch ?? externalFetch;
@@ -1384,7 +1401,8 @@ export class OmniRushGatewayBroker {
       : await this.requestBody(request, normalizedPath);
     // A picked sub-agent model the gateway refused moments ago is not tried
     // again for every step of a running sub-agent: it goes to the main model.
-    const skipped = requestBody === undefined ? null : this.skipRefusedSubagentModel(request, normalizedPath, requestBody);
+    const sessionBound = request.headers.has("x-omnirush-session-id") || request.headers.has(PARENT_SESSION_HEADER) || request.headers.has(SUBAGENT_ROOT_SESSION_HEADER);
+    const skipped = requestBody === undefined || sessionBound ? null : this.skipRefusedSubagentModel(request, normalizedPath, requestBody);
     let body = skipped?.body ?? requestBody;
     const attachments = this.leaveOutRefusedAttachments(normalizedPath, body, requestId);
     if (attachments) body = attachments.body;
@@ -1431,7 +1449,7 @@ export class OmniRushGatewayBroker {
     }
     if (skipped) {
       this.reportSubagentFallback(request, { ...skipped.event, status: response.status, ok: response.ok, clientRequestId: requestId });
-    } else if (!response.ok && response.status !== 401 && body !== undefined) {
+    } else if (!sessionBound && !response.ok && response.status !== 401 && body !== undefined) {
       response = await this.subagentFallback(request, normalizedPath, body, response, requestId);
     }
     await this.noteUpdateSignals(response, true);
@@ -1954,6 +1972,7 @@ export class OmniRushGatewayBroker {
     accessToken: string | undefined,
     requestId: string,
   ): Promise<Response> {
+    body = this.titleOnChatModel(request, path, body);
     // A model the chat's mode does not allow: refused here as the gateway would, never sent.
     if (this.modelInMode && body !== undefined && (path === "responses" || path === "responses/compact")) {
       const model = requestedModel(body);
@@ -2029,32 +2048,54 @@ export class OmniRushGatewayBroker {
   }
 
   /**
-   * A main chat's agent request (it offers tools; titles and summaries do not)
-   * whose model is not the one the chat started on: a 400
-   * `session_model_fixed`, never sent. Sub-agent chats (they name their main
-   * chat) are left to the swarm's own rules.
+   * Every context-bearing request keeps the chat's model, including summaries,
+   * compaction and children. A different model never reaches the gateway.
    */
   private fixedModelRefusal(request: Request, path: string, body: ArrayBuffer | string | undefined): Response | null {
-    if (body === undefined || path !== "responses" || request.headers.get(PARENT_SESSION_HEADER)) return null;
+    if (body === undefined || (path !== "responses" && path !== "responses/compact")) return null;
     const session = request.headers.get("x-omnirush-session-id");
-    if (!session) return null;
+    if (!session) return request.headers.has(PARENT_SESSION_HEADER) || request.headers.has(SUBAGENT_ROOT_SESSION_HEADER)
+      ? Response.json({error: {type: "invalid_request_error", code: SESSION_MODEL_FIXED, message: "A sub-agent request must name its session and pinned parent."}}, {status: 400, headers: {"x-should-retry": "false"}})
+      : null;
     let parsed: unknown;
     try {
       parsed = JSON.parse(typeof body === "string" ? body : new TextDecoder().decode(body));
     } catch {
       return null;
     }
-    if (!isRecord(parsed) || typeof parsed.model !== "string" || !Array.isArray(parsed.tools) || parsed.tools.length === 0) return null;
+    if (!isRecord(parsed) || typeof parsed.model !== "string" || !parsed.model.replace(/^omnirush\//, "").trim()) return Response.json({error: {type: "invalid_request_error", code: SESSION_MODEL_FIXED, message: "A session request must name its fixed model."}}, {status: 400, headers: {"x-should-retry": "false"}});
     const model = parsed.model.replace(/^omnirush\//, "");
-    const first = this.sessionModels.get(session);
-    if (!first) {
+    const parents = [request.headers.get(SUBAGENT_ROOT_SESSION_HEADER), request.headers.get(PARENT_SESSION_HEADER)].filter((id): id is string => Boolean(id));
+    const pins = [session, ...parents].map(id => this.sessionModels.get(id)).filter((pin): pin is string => Boolean(pin));
+    const first = pins.find(pin => pin !== model);
+    if (!first && !parents.some(id => !this.sessionModels.has(id))) {
+      if (this.sessionModels.has(session)) return null;
+      if (this.sessionModelsFile) {
+        mkdirSync(dirname(this.sessionModelsFile), {recursive: true, mode: 0o700});
+        const tmp = `${this.sessionModelsFile}.${randomUUID()}.tmp`;
+        writeFileSync(tmp, JSON.stringify({...Object.fromEntries(this.sessionModels), [session]: model}), {mode: 0o600});
+        renameSync(tmp, this.sessionModelsFile);
+      }
       this.sessionModels.set(session, model);
-      while (this.sessionModels.size > 2048) this.sessionModels.delete(this.sessionModels.keys().next().value!);
       return null;
     }
-    if (first === model) return null;
     this.log?.("info", "omnirush.ai chat model change refused (one model per chat)", { first, model });
-    return Response.json({ detail: SESSION_MODEL_FIXED, error: { type: "invalid_request_error", code: SESSION_MODEL_FIXED, message: `This chat runs on ${first}. Start a new chat to use ${model}.` } }, { status: 400, headers: { "x-should-retry": "false" } });
+    return Response.json({ detail: SESSION_MODEL_FIXED, error: { type: "invalid_request_error", code: SESSION_MODEL_FIXED, message: first ? `This chat runs on ${first}. Start a new chat to use ${model}.` : "Resume the parent chat before continuing this sub-agent; its fixed model is unavailable." } }, { status: 400, headers: { "x-should-retry": "false" } });
+  }
+
+  /**
+   * A chat's title request (the title plugin marks it, with the chat's own
+   * model) goes on the chat's model: the engine picks its cheapest model for
+   * titles, and a chat runs on one model only.
+   */
+  private titleOnChatModel(request: Request, path: string, body: ArrayBuffer | string | undefined): ArrayBuffer | string | undefined {
+    const session = request.headers.get("x-omnirush-session-id");
+    if (body === undefined || path !== "responses" || !session || request.headers.get(TITLE_HEADER) !== "1") return body;
+    const named = (request.headers.get(CHAT_MODEL_HEADER) ?? "").replace(/^omnirush\//, "");
+    const chat = this.sessionModels.get(session) ?? (FALLBACK_MODEL_ID.test(named) ? named : null);
+    const asked = requestedModel(body);
+    if (!chat || !asked || asked.replace(/^omnirush\//, "") === chat) return body;
+    return withModel(body, asked.startsWith("omnirush/") ? `omnirush/${chat}` : chat, null) ?? body;
   }
 
   /**
@@ -2065,14 +2106,14 @@ export class OmniRushGatewayBroker {
    */
   private async strictBindRefusal(bindPath: string, request: Request, path: string, body: ArrayBuffer | string | undefined): Promise<Response | null> {
     const session = request.headers.get("x-omnirush-session-id");
-    if (body === undefined || path !== "responses" || !session) return null;
+    if (body === undefined || (path !== "responses" && path !== "responses/compact") || !session) return null;
     let parsed: unknown;
     try {
       parsed = JSON.parse(typeof body === "string" ? body : new TextDecoder().decode(body));
     } catch {
       return null;
     }
-    if (!isRecord(parsed) || typeof parsed.model !== "string" || !Array.isArray(parsed.tools) || parsed.tools.length === 0) return null;
+    if (!isRecord(parsed) || typeof parsed.model !== "string") return null;
     const model = parsed.model.replace(/^omnirush\//, "");
     const rootId = request.headers.get(PARENT_SESSION_HEADER);
     const rootModel = rootId ? this.sessionModels.get(rootId) : null;

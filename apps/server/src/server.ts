@@ -1254,6 +1254,7 @@ export async function startServer(config: ServerConfig): Promise<ServeResult> {
       : undefined
   );
   const gatewayBroker = new OmniRushGatewayBroker({
+    sessionModelsFile: join(runtimeStorageDir(config), "chat-models.json"),
     log: (level, message, attributes) => logger.log(level, message, attributes),
     credentials: gatewayCredentials
       ? {
