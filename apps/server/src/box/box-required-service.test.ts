@@ -250,3 +250,39 @@ describe("required sandbox: the desktop's projects", () => {
     expect(await boxes.planOutcome("ses_old_srv1", workspace)).toEqual({ native: true, source: "project", reason: "off" });
   });
 });
+
+describe("required sandbox: a stopped send", () => {
+  test("a held prompt whose request is given up stops waiting at once and takes no checkpoint", async () => {
+    const stateDir = await temp("state");
+    const root = await temp("project");
+    const workspace: BoxWorkspace = { id: "ws_stop", path: root, workspaceType: "local" };
+    rememberServerDefault(stateDir, { local_box: { default: "on", required: true } });
+    const boxes = service({ stateDir, workspaces: [workspace], env: { OMNIRUSH_BOX_HOME: await temp("boxhome") } });
+    const frozen: string[] = [];
+    const projects: unknown = Reflect.get(boxes, "projects");
+    if (!(projects instanceof Map)) throw new Error("no projects map");
+    let ready = false;
+    let tries = 0;
+    boxes.ensure = async () => {
+      tries += 1;
+      if (!ready) {
+        projects.set(boxKey(root), { run: null, notice: "downloading", planning: null, nextPlanAt: 0, waitingImage: true, why: { reason: "downloading" } });
+        return null;
+      }
+      return fakeRun(root, frozen);
+    };
+    const stop = new AbortController();
+    const started = Date.now();
+    const waiting = boxes.beforePrompt("ses_req_stop1", workspace, { signal: stop.signal });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    stop.abort();
+    expect(await waiting).toBeNull();
+    expect(Date.now() - started).toBeLessThan(1_000);
+    // The box becomes ready afterwards: nothing runs for the stopped prompt.
+    ready = true;
+    const before = tries;
+    await new Promise((resolve) => setTimeout(resolve, 1_200));
+    expect(tries).toBe(before);
+    expect(frozen).toEqual([]);
+  });
+});

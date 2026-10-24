@@ -779,7 +779,7 @@ export class BoxService {
    * label returned for its uploads. Null when the chat runs natively. Never
    * throws; waits at most FREEZE_WAIT_MS.
    */
-  async beforePrompt(sessionId: string, workspace: BoxWorkspace, { capture = true, turnsBefore = 0 }: { capture?: boolean; turnsBefore?: number } = {}): Promise<BoxCaptureInfo | null> {
+  async beforePrompt(sessionId: string, workspace: BoxWorkspace, { capture = true, turnsBefore = 0, signal }: { capture?: boolean; turnsBefore?: number; signal?: AbortSignal } = {}): Promise<BoxCaptureInfo | null> {
     if (!/^[A-Za-z0-9._:-]{8,128}$/.test(sessionId)) return null;
     // The chat's own turn number, counted with the box on or off: a chat that ran natively
     // (reopened, or its box turned on mid-chat) has its first checkpoint (turn-1) before a later
@@ -796,7 +796,9 @@ export class BoxService {
       await this.writeProjects();
       this.log("info", "box: a chat that ran on this machine stays there", { sessionId, turnsBefore, required: true });
     }
-    const run = required && !this.nativeChats.has(sessionId) ? await this.waitForBox(workspace) : await this.ensure(workspace).catch(() => null);
+    const run = required && !this.nativeChats.has(sessionId) ? await this.waitForBox(workspace, signal) : await this.ensure(workspace).catch(() => null);
+    // The send was stopped while it waited: no checkpoint, and the caller does not dispatch it.
+    if (signal?.aborted) return null;
     if (!run || run.native) return null;
     // A chat with turns but no checkpoint ran on this machine (reopened, or started in this run before the
     // server's default reached the app, or while the image downloaded): when only the server's default
@@ -836,12 +838,14 @@ export class BoxService {
    * when it cannot run here (no backend: the setup screen says why; the
    * chat goes on per the server's required_fallback).
    */
-  private async waitForBox(workspace: BoxWorkspace): Promise<BoxRun | null> {
+  private async waitForBox(workspace: BoxWorkspace, signal?: AbortSignal): Promise<BoxRun | null> {
     const key = boxKey(boxRoot(workspace));
     const startedAt = Date.now();
     let lastProgressAt = startedAt;
     let said = false;
     for (;;) {
+      // A stopped send stops waiting at once (its request was given up).
+      if (signal?.aborted) return null;
       const run = await this.ensure(workspace).catch(() => null);
       if (run) return run;
       const project = this.projects.get(key);
@@ -858,7 +862,16 @@ export class BoxService {
         said = true;
         this.log("info", "required sandbox: the prompt waits for the first setup", { maxMin: Math.round(REQUIRED_SETUP_MAX_MS / 60_000) });
       }
-      await new Promise((resolve) => setTimeout(resolve, REQUIRED_POLL_MS));
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(done, REQUIRED_POLL_MS);
+        function done() {
+          clearTimeout(timer);
+          signal?.removeEventListener("abort", done);
+          resolve();
+        }
+        signal?.addEventListener("abort", done, { once: true });
+      });
+      if (signal?.aborted) return null;
       if (pull && !pulling(this.home, pull.runtime, pull.image.pull)) project.nextPlanAt = 0;
     }
   }
