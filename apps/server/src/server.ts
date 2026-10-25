@@ -1308,6 +1308,8 @@ export async function startServer(config: ServerConfig): Promise<ServeResult> {
     ...(config.omnirushGatewayCredentials?.onUpdateSignal ? { onUpdateSignal: config.omnirushGatewayCredentials.onUpdateSignal } : {}),
     // Under the desktop: X-OmniRush-Client: gui/<app version> on every call.
     ...(config.appVersion?.trim() ? { clientVersion: config.appVersion.trim() } : {}),
+    // A chat's title request, as sent, and the title the model wrote: a `model.request` record of kind "title" (never a turn).
+    onModelRequest: (sessionId, data) => recordOpenSessionTrace(config, sessionId, "model.request", data),
     onSubagentFallback: (event) => {
       if (event.reason !== "refused_recently") subagentModelRefusals(config).mark(event.requested, event.reason);
       recordSubagentModelFallback(config, event.rootSessionId, {

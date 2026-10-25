@@ -84,6 +84,11 @@ type BrokerOptions = {
   /** Hears every sub-agent request moved to the main model (see subagentFallback). */
   onSubagentFallback?: (event: SubagentModelFallbackEvent) => void;
   /**
+   * A chat's title request once answered: the trace record ({ schema, kind: "title", route, model, status,
+   * request, text, completed }), the request as the engine sent it and the title as the model wrote it.
+   */
+  onModelRequest?: (sessionId: string, data: Record<string, unknown>) => void;
+  /**
    * Whether a catalog model may run in a box (sandbox) chat or a native one
    * (model-modes/). False: the request gets a 400 model_not_in_mode here and
    * is never sent. Unset: every model goes to the gateway, which judges.
@@ -177,6 +182,40 @@ export function answerCompleted(tail: string, contentType: string): boolean {
   if (!contentType.includes("event-stream")) return tail.trim().length > 0;
   return /"type"\s*:\s*"(?:response\.completed|response\.done|message_stop)"|^data:\s*\[DONE\]/m.test(tail);
 }
+
+/**
+ * The text a model reply carries, as the model wrote it: the Responses API's
+ * output_text deltas (else the completed response's output text), chat
+ * completions' content deltas, or a plain JSON reply's. Null when none.
+ */
+export function replyText(raw: string, contentType: string): string | null {
+  const fromResponse = (r: any): string | null => {
+    if (typeof r?.output_text === "string") return r.output_text;
+    const parts = (Array.isArray(r?.output) ? r.output : []).flatMap((item: any) => (Array.isArray(item?.content) ? item.content : []));
+    const joined = parts.filter((p: any) => typeof p?.text === "string").map((p: any) => p.text).join("");
+    if (joined) return joined;
+    const content = r?.choices?.[0]?.message?.content;
+    return typeof content === "string" ? content : null;
+  };
+  if (!contentType.includes("event-stream")) {
+    try { return fromResponse(JSON.parse(raw)); } catch { return null; }
+  }
+  let deltas: string | null = null;
+  let completed: string | null = null;
+  for (const line of raw.split(/\r?\n/)) {
+    if (!line.startsWith("data:")) continue;
+    let event: any;
+    try { event = JSON.parse(line.slice(5).trim()); } catch { continue; }
+    const chat = event?.choices?.[0]?.delta?.content;
+    if (event?.type === "response.output_text.delta" && typeof event.delta === "string") deltas = (deltas ?? "") + event.delta;
+    else if (typeof chat === "string") deltas = (deltas ?? "") + chat;
+    else if ((event?.type === "response.completed" || event?.type === "response.done") && event.response) completed = fromResponse(event.response);
+  }
+  return deltas ?? completed;
+}
+
+/** A title reply is a few words; one past this is not kept whole. */
+const MAX_TITLE_REPLY_BYTES = 1024 * 1024;
 
 const TERMINAL_RESPONSE_EVENTS = new Set(["response.completed", "response.incomplete", "response.failed"]);
 const TERMINAL_OR_ERROR_MARKER = /"(?:response\.(?:completed|incomplete|failed)|error)"/;
@@ -1299,6 +1338,7 @@ export class OmniRushGatewayBroker {
   private readonly log?: BrokerOptions["log"];
   private readonly sessionUploadBudget: SessionUploadBudget;
   private readonly onSubagentFallback?: BrokerOptions["onSubagentFallback"];
+  private readonly onModelRequest?: BrokerOptions["onModelRequest"];
   private readonly subagentRetryDelayMs: number;
   private readonly subagentModelRefused?: (model: string) => boolean;
   private readonly modelInMode?: BrokerOptions["modelInMode"];
@@ -1388,6 +1428,7 @@ export class OmniRushGatewayBroker {
     this.log = options.log;
     this.sessionUploadBudget = options.sessionUploadBudget ?? SESSION_UPLOAD_BUDGET;
     this.onSubagentFallback = options.onSubagentFallback;
+    this.onModelRequest = options.onModelRequest;
     this.subagentRetryDelayMs = options.subagentRetryDelayMs ?? SUBAGENT_RETRY_DELAY_MS;
     this.subagentModelRefused = options.subagentModelRefused;
     this.modelInMode = options.modelInMode;
@@ -1536,7 +1577,7 @@ export class OmniRushGatewayBroker {
           }),
         })
       : upstreamBody;
-    return new Response(responseBody, {
+    return new Response(this.titleRecord(request, normalizedPath, body, response, responseBody), {
       status: response.status,
       statusText: response.statusText,
       headers: responseHeaders(response.headers, requestId),
@@ -2222,6 +2263,37 @@ export class OmniRushGatewayBroker {
     const asked = requestedModel(body);
     if (!chat || !asked || asked.replace(/^omnirush\//, "") === chat) return body;
     return withModel(body, asked.startsWith("omnirush/") ? `omnirush/${chat}` : chat, null) ?? body;
+  }
+
+  /**
+   * A chat's title request: its reply passes through unchanged and, once it ends, goes to onModelRequest
+   * with the request as the engine sent it (on the chat's model) and the title text.
+   */
+  private titleRecord(request: Request, path: string, body: ArrayBuffer | string | undefined, response: Response, stream: ReadableStream<Uint8Array> | null): ReadableStream<Uint8Array> | null {
+    const session = request.headers.get("x-omnirush-session-id");
+    if (!this.onModelRequest || !stream || !session || body === undefined || path !== "responses" || request.headers.get(TITLE_HEADER) !== "1") return stream;
+    const sent = this.titleOnChatModel(request, path, body) ?? body;
+    const contentType = response.headers.get("content-type") ?? "";
+    const decoder = new TextDecoder();
+    let reply = "";
+    let bytes = 0;
+    const record = (completed: boolean) => {
+      reply += decoder.decode();
+      let parsed: unknown = null;
+      try { parsed = JSON.parse(typeof sent === "string" ? sent : new TextDecoder().decode(sent)); } catch { /* not JSON: kept as null */ }
+      const model = isRecord(parsed) && typeof parsed.model === "string" ? parsed.model : null;
+      try {
+        this.onModelRequest?.(session, { schema: 1, kind: "title", route: path, model, status: response.status, request: parsed, text: replyText(reply, contentType), completed: completed && answerCompleted(reply.slice(-STRICT_TAIL_CHARS), contentType), ...(bytes >= MAX_TITLE_REPLY_BYTES ? { reply_truncated: true } : {}) });
+      } catch { /* a listener never breaks the request */ }
+    };
+    return stream.pipeThrough(new TransformStream<Uint8Array, Uint8Array>({
+      transform: (chunk, controller) => {
+        if (bytes < MAX_TITLE_REPLY_BYTES) { reply += decoder.decode(chunk, { stream: true }); bytes += chunk.byteLength; }
+        controller.enqueue(chunk);
+      },
+      // shortcut: a title the engine stops reading mid-stream is not recorded (no cancel hook in these types); add one if aborts show up.
+      flush: () => record(true),
+    }));
   }
 
   /**
