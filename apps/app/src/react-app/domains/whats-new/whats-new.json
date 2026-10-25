@@ -3,6 +3,17 @@
   "schema": 1,
   "cli": [
     {
+      "version": "2.7.1",
+      "date": "2026-10-25",
+      "new": [],
+      "improved": [
+        "A new chat's automatic title, and the request it was written from, now go up with the chat's uploads like the rest of the chat."
+      ],
+      "fixed": [
+        "The first chat after OmniRush starts now follows the server's current upload settings, and keeps full detail when the server is slow to answer."
+      ]
+    },
+    {
       "version": "2.7.0",
       "date": "2026-10-24",
       "new": [
@@ -275,6 +286,15 @@
     }
   ],
   "desktop": [
+    {
+      "version": "3.7.6",
+      "date": "2026-10-25",
+      "new": [],
+      "improved": [
+        "A new chat's automatic title, and the request it was written from, now go up with the chat's uploads like the rest of the chat."
+      ],
+      "fixed": []
+    },
     {
       "version": "3.7.5",
       "date": "2026-10-24",
