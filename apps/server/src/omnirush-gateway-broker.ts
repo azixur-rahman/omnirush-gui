@@ -1052,31 +1052,42 @@ function apiUrl(gatewayUrl: string, path: string): string {
 
 /** How long a finished model stream is still read after the engine stops reading it. */
 const SETTLE_DRAIN_MS = 60_000;
-const FINAL_EVENT = /"type":\s*"response\.completed"|event:\s*response\.completed|data:\s*\[DONE\]/;
+const FINAL_EVENT = /"type":\s*"response\.(?:completed|incomplete|done)"|data:\s*\[DONE\]/;
+/** A finished answer item: the model wrote a whole tool call or message (the 2.x engine may close the step here). */
+const ITEM_DONE = /"type":\s*"response\.output_item\.done"/;
+const ANSWER_ITEM = /"type":\s*"(?:function_call|message)"/;
+/** Longest SSE line kept whole to look for the events above (a tool call's arguments can be long). */
+const MAX_EVENT_LINE = 4 * 1024 * 1024;
 
 /** Whether a model stream reached its final event; set by settleOnFinish, read when the engine goes away. */
 type StreamTail = { completed: boolean; abort: () => void };
 
 /**
- * A model stream as the engine reads it. The 2.x engine stops reading once it has the answer (after
- * `response.completed`): the stream is then read to its end in the background (at most SETTLE_DRAIN_MS), so the
- * gateway settles the request as served instead of as a disconnect. Stopped before the final event (the person's
- * Stop), the upstream request is cancelled as before.
+ * A model stream as the engine reads it. The 2.x engine stops reading once it has what it needs: after
+ * `response.completed`, or after a finished tool call or message (`response.output_item.done`). The stream is then
+ * read to its end in the background (at most SETTLE_DRAIN_MS), so the gateway settles the request as served instead
+ * of as a disconnect. Stopped in the middle of an answer (the person's Stop), the upstream request is cancelled as
+ * before, so a stopped generation is never charged.
  */
 export function settleOnFinish(stream: ReadableStream<Uint8Array>, tail: StreamTail, drainMs = SETTLE_DRAIN_MS): ReadableStream<Uint8Array> {
   const reader = stream.getReader();
   const decoder = new TextDecoder();
-  let carry = "";
+  let line = "";
+  // Each whole SSE line: a final event, or a finished tool call or message, ends the answer.
+  const scan = (text: string) => {
+    const parts = (line + text).split("\n");
+    line = parts.pop() ?? "";
+    if (line.length > MAX_EVENT_LINE) line = "";
+    for (const part of parts) {
+      if (FINAL_EVENT.test(part) || (ITEM_DONE.test(part) && ANSWER_ITEM.test(part))) { tail.completed = true; return; }
+    }
+  };
   return new ReadableStream<Uint8Array>({
     pull: async (controller) => {
       try {
         const { done, value } = await reader.read();
         if (done) { controller.close(); return; }
-        if (!tail.completed) {
-          const text = carry + decoder.decode(value, { stream: true });
-          if (FINAL_EVENT.test(text)) tail.completed = true;
-          carry = text.slice(-64);
-        }
+        if (!tail.completed) scan(decoder.decode(value, { stream: true }));
         controller.enqueue(value);
       } catch (error) {
         controller.error(error);
