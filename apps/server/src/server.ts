@@ -1564,6 +1564,7 @@ export async function startServer(config: ServerConfig): Promise<ServeResult> {
     if (config.workspaces.length > 0) cloudProviderSync.markReloadPending();
   };
   const engineV2Preview = createEngineV2Preview({ config, env, deferStart: true });
+  engineV2Refreshers.set(config, () => engineV2Preview.refreshProviders());
   engineV2ByServer.set(config, engineV2Preview);
   /** A chat on the 2.x engine, read where it lives (its folder), or null. */
   const v2ChatTarget = async (sessionId: string): Promise<EngineTarget | null> => {
@@ -3448,12 +3449,17 @@ async function applyServerBoxDefault(config: ServerConfig, boxes: ReturnType<typ
   void boxes.prefetch().catch(() => false);
 }
 
+/** Each server's 2.x engine config rewrite (engine-v2-preview.ts refreshProviders), for applyBoxEngineConfig. */
+const engineV2Refreshers = new WeakMap<ServerConfig, () => Promise<void>>();
+
 /**
  * The Linux sandbox's engine bits (box/service.ts engineBits) may have
  * changed: the engine config file is written again and, when it changed,
  * the managed engine rolls over to it (as for a best-practices change).
  */
 async function applyBoxEngineConfig(config: ServerConfig, reason: string, options: { restart?: boolean } = {}): Promise<{ status: "unchanged" | "applied" | "deferred" | "failed" | "unmanaged" }> {
+  // The 2.x engine (every chat) gets the same bits through its own config file, written again here.
+  await engineV2Refreshers.get(config)?.().catch(() => undefined);
   try {
     const written = await writeOmniRushRuntimeConfigFile(config);
     // `restart`: the engine's environment changed too (the provider lock), so a new engine even when the file did not.

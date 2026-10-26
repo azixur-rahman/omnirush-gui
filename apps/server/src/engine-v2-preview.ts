@@ -29,6 +29,8 @@ import { engineDataDir } from "./engine-data-home.js";
 import { computerUseEngineEnv } from "./computer-use/desktop.js";
 import { engineV2Root, readMigratedSessions, seedV2StoreFromV1 } from "./engine-v2-migration.js";
 import type { ServerConfig } from "./types.js";
+import { boxServiceFor } from "./box/desktop.js";
+import { omnirushBoxNextPluginPath } from "./omnirush-extensions-plugin-path.js";
 
 const PREVIEW_STATE_FILE = "engine-v2-preview.json";
 const UNSET_API_KEY = "omnirush-engine-v2-preview-unset";
@@ -148,6 +150,14 @@ async function resolveBinary(config: ServerConfig): Promise<ResolvedBinary> {
   const bin = process.env.OMNIRUSH_OPENCODE2_BIN?.trim();
   if (!bin) throw new Error("The OmniRush engine was not found. Reinstall OmniRush.ai.");
   return { bin, source: "env" };
+}
+
+/**
+ * The box's engine bits for the 2.x engine: the box shell as is, and the box plugin as its 2.x
+ * module (omnirush-box-next.ts; the 1.x hook object it wraps is not loaded by 2.x). Null: no box.
+ */
+export function v2BoxBits(bits: { shell: string; plugin: string } | null): { shell: string; plugin: string } | null {
+  return bits ? { shell: bits.shell, plugin: omnirushBoxNextPluginPath() } : null;
 }
 
 export function mapRuntimeProvidersToV2Specs(
@@ -531,6 +541,8 @@ export function createEngineV2Preview(options: { config: ServerConfig; env?: Pic
       },
       permissions: async () => executionRules((await readGlobalRuntimeOpencodeConfig(config)).managedPolicy?.execution),
       webSearch: () => webSearchSetting({ env: process.env, stateDir: runtimeStorageDir(config) }).enabled,
+      // The Linux sandbox (box/): the shell and box plugin follow BoxService.engineBits on every config write.
+      box: async () => v2BoxBits(await boxServiceFor(config).engineBits()),
       mcpGate: v2McpGate(runtimeStorageDir(config), { ...process.env, ...computerUseEngineEnv(runtimeStorageDir(config)) }, Boolean(await cloudConnector())),
     });
     sidecar = managed;

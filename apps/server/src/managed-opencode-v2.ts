@@ -45,6 +45,8 @@ export interface ManagedOpencodeV2ServerOptions {
   webSearch?: () => boolean;
   /** The MCP servers the engine's gate allows (engine-v2-mcp.ts); none when absent. */
   mcpGate?: string[];
+  /** The Linux sandbox's engine bits (engine-v2-preview.ts v2BoxBits): the box shell and the 2.x box plugin; null: none. */
+  box?: () => Promise<{ shell: string; plugin: string } | null>;
 }
 
 export interface OpencodeV2Health {
@@ -139,7 +141,7 @@ export async function createManagedOpencodeV2Server(
   // cloud, database, or control-plane credentials. Unknown keys stay private.
   const inherited: Record<string, string> = {};
   for (const key of [
-    "OMNIRUSH_SERVER_URL", "OMNIRUSH_POLICY_TOKEN", "OMNIRUSH_ACCESS_TOKEN",
+    "OMNIRUSH_SERVER_URL", "OMNIRUSH_POLICY_TOKEN", "OMNIRUSH_ACCESS_TOKEN", "OMNIRUSH_BOX_HOME",
     "PATH", "HOME", "USER", "LOGNAME", "SHELL", "TMPDIR", "TMP", "TEMP",
     "LANG", "LC_ALL", "LC_CTYPE", "TZ", "TERM", "CI",
     "XDG_CACHE_HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_RUNTIME_DIR",
@@ -288,6 +290,8 @@ export async function createManagedOpencodeV2Server(
       };
     }
     const target = join(configDir, "opencode.json");
+    // The box shell runs each command in its project's box (boxsh; natively for a project without one).
+    const box = await options.box?.().catch(() => null) ?? null;
     await writeFileAtomic(target, `${JSON.stringify({
       $schema: "https://opencode.ai/config.json",
       // No session sharing to an outside service; the bundled engine never replaces itself.
@@ -305,7 +309,8 @@ export async function createManagedOpencodeV2Server(
       // Off: no provider is picked (never `false`, which would take the tool out of the stock list).
       // shortcut: Exa until the gateway serves a search integration of its own.
       ...(options.webSearch?.() ? { websearch: { provider: "exa" } } : {}),
-      plugins: await pluginDirectories(join(options.rootDir, "plugins"), [sessionNextPluginPath(), ...(options.env?.OMNIRUSH_SERVER_URL ? [managedPolicyPluginPath(true)] : [])]),
+      ...(box ? { shell: box.shell } : {}),
+      plugins: await pluginDirectories(join(options.rootDir, "plugins"), [sessionNextPluginPath(), ...(options.env?.OMNIRUSH_SERVER_URL ? [managedPolicyPluginPath(true)] : []), ...(box ? [box.plugin] : [])]),
     }, null, 2)}\n`, { mode: 0o600 });
   }
 

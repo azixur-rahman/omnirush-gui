@@ -32,6 +32,8 @@ export function omnirushPluginPath(name: string, here?: string): string {
 }
 
 export const omnirushExtensionsPreviewPluginPath = () => omnirushPluginPath("omnirush-extensions-preview");
+/** The box plugin on the 2.x engine (opencode-plugins/omnirush-box-next.ts). */
+export const omnirushBoxNextPluginPath = () => omnirushPluginPath("omnirush-box-next");
 export const omnirushChromeDevtoolsPluginPath = () => omnirushPluginPath("omnirush-chrome-devtools");
 export const omnirushCapabilitiesKnowledgePluginPath = () => omnirushPluginPath("omnirush-capabilities-knowledge");
 export const omnirushAnthropicAdaptiveThinkingPluginPath = () => omnirushPluginPath("omnirush-anthropic-adaptive-thinking");

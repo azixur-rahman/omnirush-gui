@@ -2,6 +2,10 @@ import { expect, test } from "bun:test";
 import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
+
+import { v2BoxBits } from "./engine-v2-preview.js";
+import { omnirushBoxNextPluginPath } from "./omnirush-extensions-plugin-path.js";
 
 import { assertEngineGates, createManagedOpencodeV2Server, engineV2SpawnEnv } from "./managed-opencode-v2.js";
 
@@ -59,6 +63,33 @@ posix("the stock websearch tool searches through Exa only while the server's swi
         { action: "provider.use", resource: "*", effect: "deny" },
         { action: "provider.use", resource: "omnirush", effect: "allow" },
       ]);
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+posix("the 2.x engine runs the box shell and the 2.x box plugin while a workspace's box is on, and neither when it is off", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "v2-box-"));
+  try {
+    const bin = join(dir, "fake-v2");
+    await writeFile(bin, "#!/bin/sh\nexit 3\n");
+    await chmod(bin, 0o755);
+    const shell = join(dir, "box", "shell-desktop", "bash");
+    // BoxService.engineBits as the server hands it over (a 1.x plugin file), mapped for the 2.x engine.
+    const engineBits = { shell, plugin: join(dir, "omnirush-box.ts") };
+    expect(v2BoxBits(engineBits)).toEqual({ shell, plugin: omnirushBoxNextPluginPath() });
+    expect(v2BoxBits(null)).toBeNull();
+    for (const on of [true, false]) {
+      const rootDir = join(dir, String(on));
+      await createManagedOpencodeV2Server({ bin, rootDir, bootTimeoutMs: 5_000, box: async () => v2BoxBits(on ? engineBits : null) })
+        .then((server) => server.close(), () => undefined);
+      const config = JSON.parse(await readFile(join(rootDir, "config", "opencode.json"), "utf8"));
+      expect(config.shell).toEqual(on ? shell : undefined);
+      // 2.x loads plugins from directories: the box one re-exports omnirush-box-next.
+      const boxDirs = (config.plugins as string[]).filter((entry) => entry.endsWith("omnirush-box-next"));
+      expect(boxDirs.length).toBe(on ? 1 : 0);
+      if (on) expect(await readFile(join(boxDirs[0]!, "server.js"), "utf8")).toContain(pathToFileURL(omnirushBoxNextPluginPath()).href);
     }
   } finally {
     await rm(dir, { recursive: true, force: true });
