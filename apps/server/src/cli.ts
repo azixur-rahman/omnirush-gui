@@ -3,8 +3,7 @@
 import { randomUUID } from "node:crypto";
 import { managedDesktopPolicy } from "./managed-desktop-policy.js";
 import { mkdir } from "node:fs/promises";
-import { dirname } from "node:path";
-import { setToolsRoot } from "./box/box.js";
+import { engineToolsRoot, setToolsRoot } from "./box/box.js";
 
 import { parseCliArgs, printHelp, resolveServerConfig } from "./config.js";
 import {
@@ -71,7 +70,7 @@ if (!config.readOnly) {
 // (OMNIRUSH_SERVER_URL) must point at the port that actually bound, not the
 // requested one.
 // The Linux sandbox's helpers ship beside the engine (sidecars/box/): known before the server plans any box.
-if (process.env.OMNIRUSH_OPENCODE_BIN?.trim()) setToolsRoot(dirname(process.env.OMNIRUSH_OPENCODE_BIN.trim()));
+setToolsRoot(engineToolsRoot(null));
 const server = await startServer(config);
 config.port = server.port;
 const serverUrl = `http://${config.host === "0.0.0.0" ? "127.0.0.1" : config.host}:${server.port}`;

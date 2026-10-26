@@ -11,8 +11,7 @@ import { randomUUID } from "node:crypto";
 import { stopTaskRecovery } from "./task-recovery.js";
 import { managedDesktopPolicy } from "./managed-desktop-policy.js";
 import { mkdir } from "node:fs/promises";
-import { dirname } from "node:path";
-import { setToolsRoot } from "./box/box.js";
+import { engineToolsRoot, setToolsRoot } from "./box/box.js";
 import { setWriteCheckEngine } from "./folder-write-check.js";
 import { resolveServerConfig, type CliArgs } from "./config.js";
 import {
@@ -236,7 +235,8 @@ export async function startEmbeddedServer(options: EmbeddedServerOptions): Promi
   // desktop only learns the server URL after this function returns.
   // The Linux sandbox's helpers ship beside the engine (sidecars/box/): known before the server plans any box.
   const engineBin = options.opencodeBin || process.env.OMNIRUSH_OPENCODE_BIN;
-  if (engineBin?.trim()) setToolsRoot(dirname(engineBin.trim()));
+  // The 2.x engine ships in the same sidecars folder: an app without the 1.x engine finds the helpers there.
+  setToolsRoot(engineToolsRoot(options.opencodeBin));
   setWriteCheckEngine(engineBin);
   server = await duringStartup(() => startServer(config));
   config.port = server.port;

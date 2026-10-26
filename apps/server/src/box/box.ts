@@ -43,7 +43,7 @@ import { REQUIRED_RULES, shadowRecord, shadowsNotice, type ShadowBind, type Shad
 
 type Env = NodeJS.ProcessEnv;
 
-export { BOX_PORT, DEPS_MAX_BYTES, FILE_MAX_BYTES, GOARCH, GOOS, HOME_IN_BOX, LABEL, RECORD_SCHEMA, RUN_DIR, SHIMS_DIR, TAR_MAX_BYTES, boxHome, boxKey, canonicalRoot, containerName, containerRoot, helperDirs, helperPath, installShell, readRecord, recordFile, runDir, setToolsRoot, wslPath, type BoxInstallLog, type BoxLog, type BoxRecord, type BoxRuntime } from "./common.js";
+export { BOX_PORT, DEPS_MAX_BYTES, FILE_MAX_BYTES, GOARCH, GOOS, HOME_IN_BOX, LABEL, RECORD_SCHEMA, RUN_DIR, SHIMS_DIR, TAR_MAX_BYTES, boxHome, boxKey, canonicalRoot, containerName, containerRoot, engineToolsRoot, helperDirs, helperPath, installShell, readRecord, recordFile, runDir, setToolsRoot, wslPath, type BoxInstallLog, type BoxLog, type BoxRecord, type BoxRuntime } from "./common.js";
 export { commandUser, createArgs, inspectImage, parseSize, pullImage, resourceArgs, rt, singleFileTar } from "./backends/container.js";
 export type { ListedBox } from "./backends/types.js";
 

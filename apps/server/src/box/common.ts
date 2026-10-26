@@ -125,6 +125,16 @@ export function setToolsRoot(dir: string | null | undefined): void {
   platformTools = dir || null;
 }
 
+/**
+ * The sidecars folder the helpers ship in: the folder of the 1.x engine when
+ * one still ships, else of the 2.x engine (OMNIRUSH_OPENCODE2_BIN, set by the
+ * desktop on every OS). Null when neither is known.
+ */
+export function engineToolsRoot(opencodeBin: string | null | undefined, env: Env = process.env): string | null {
+  const bin = [opencodeBin, env.OMNIRUSH_OPENCODE_BIN, env.OMNIRUSH_OPENCODE2_BIN].map((value) => String(value ?? "").trim()).find(Boolean);
+  return bin ? path.dirname(bin) : null;
+}
+
 /** The sidecars folder set at start (null: none; tests, a dev server). */
 export function toolsRoot(): string | null {
   return platformTools;
